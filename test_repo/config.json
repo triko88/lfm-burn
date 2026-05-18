@@ -1,0 +1,7 @@
+{
+  "hidden_size": 4,
+  "vocab_size": 8,
+  "num_layers": 2,
+  "conv_kernel_size": 3,
+  "layer_types": ["attention", "conv"]
+}

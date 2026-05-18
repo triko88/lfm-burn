@@ -1,0 +1,12 @@
+[package]
+name = "lfm-burn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+burn = { version = "0.21.0", features = ["ndarray", "wgpu", "store"] }
+bytemuck = "1.25.0"
+memmap2 = "0.9.10"
+safetensors = "0.7.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
