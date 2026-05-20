@@ -13,6 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let v = 8usize;
     let k = 3usize;
 
+    // Must match test_repo/config.json layer_types
+    let layer_types = ["conv", "full_attention"];
+
     let d2_hxh = zeros(h * h);
     let d2_vxh = zeros(v * h);
     let d1_h = zeros(h);
@@ -29,51 +32,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         TensorView::new(Dtype::F32, vec![h], &d1_h)?,
     );
 
-    // MLP fields — loader uses literal "{x}", not a format string
-    for key in ["w1", "w2", "w3"] {
+    for (x, layer_type) in layer_types.iter().enumerate() {
+        for key in ["w1", "w2", "w3"] {
+            tensors.insert(
+                format!("model.layers.{x}.feed_forward.{key}.weight"),
+                TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+            );
+        }
         tensors.insert(
-            format!("model.layers.{{x}}.feed_forward.{key}.weight"),
-            TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+            format!("model.layers.{x}.ffn_norm.weight"),
+            TensorView::new(Dtype::F32, vec![h], &d1_h)?,
         );
-    }
-    tensors.insert(
-        "model.layers.{x}.ffn_norm.weight".into(),
-        TensorView::new(Dtype::F32, vec![h], &d1_h)?,
-    );
-    tensors.insert(
-        "model.layers.{x}.operator_norm.weight".into(),
-        TensorView::new(Dtype::F32, vec![h], &d1_h)?,
-    );
-
-    // Attention sequence — loader uses literal "{x}"
-    for key in ["q_proj", "k_proj", "v_proj", "out_proj"] {
         tensors.insert(
-            format!("model.layers.{{x}}.self_attn.{key}.weight"),
-            TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+            format!("model.layers.{x}.operator_norm.weight"),
+            TensorView::new(Dtype::F32, vec![h], &d1_h)?,
         );
-    }
-    tensors.insert(
-        "model.layers.{x}.self_attn.q_layernorm.weight".into(),
-        TensorView::new(Dtype::F32, vec![h], &d1_h)?,
-    );
-    tensors.insert(
-        "model.layers.{x}.self_attn.k_layernorm.weight".into(),
-        TensorView::new(Dtype::F32, vec![h], &d1_h)?,
-    );
 
-    // Conv sequence — loader uses literal "{x}"
-    tensors.insert(
-        "model.layers.{x}.conv.in_proj.weight".into(),
-        TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
-    );
-    tensors.insert(
-        "model.layers.{x}.conv.out.weight".into(),
-        TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
-    );
-    tensors.insert(
-        "model.layers.{x}.conv.conv.weight".into(),
-        TensorView::new(Dtype::F32, vec![h, h, k], &d3_hxhxk)?,
-    );
+        match *layer_type {
+            "conv" => {
+                tensors.insert(
+                    format!("model.layers.{x}.conv.in_proj.weight"),
+                    TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+                );
+                tensors.insert(
+                    format!("model.layers.{x}.conv.out_proj.weight"),
+                    TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+                );
+                tensors.insert(
+                    format!("model.layers.{x}.conv.conv.weight"),
+                    TensorView::new(Dtype::F32, vec![h, h, k], &d3_hxhxk)?,
+                );
+            }
+            "full_attention" => {
+                for key in ["q_proj", "k_proj", "v_proj", "out_proj"] {
+                    tensors.insert(
+                        format!("model.layers.{x}.self_attn.{key}.weight"),
+                        TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+                    );
+                }
+                tensors.insert(
+                    format!("model.layers.{x}.self_attn.q_layernorm.weight"),
+                    TensorView::new(Dtype::F32, vec![h], &d1_h)?,
+                );
+                tensors.insert(
+                    format!("model.layers.{x}.self_attn.k_layernorm.weight"),
+                    TensorView::new(Dtype::F32, vec![h], &d1_h)?,
+                );
+            }
+            other => return Err(format!("unknown layer_type: {other}").into()),
+        }
+    }
 
     let bytes = safetensors::serialize(&tensors, None)?;
 
