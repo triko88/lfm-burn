@@ -1,6 +1,10 @@
-mod weights;
 mod weight_loader;
 mod config;
+mod self_attn;
+mod short_conv;
+mod transformer;
+mod lfm_text;
+mod utils;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

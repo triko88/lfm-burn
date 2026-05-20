@@ -14,13 +14,13 @@ use safetensors::{
 use memmap2::Mmap;
 
 use crate::{
-    weights::{
-        Model,
+    self_attn::SelfAttn,
+    short_conv::ShortConv,
+    transformer::{
+        Transformer,
         Sequence,
-        SelfAttn,
-        ShortConv,
-        LFMLayer,
     },
+    lfm_text::Model,
     config::{
         LFMConfig,
         ConfigLayer,
@@ -39,38 +39,42 @@ fn to_tensor<Bknd: Backend, const Dim: usize>(view: &TensorView, device: &Bknd::
     Tensor::<Bknd, Dim>::from_data(tensor_data, device)
 }
 
-fn build_layers<Bknd: Backend>(config_layers: Vec<ConfigLayer>, tensors: &SafeTensors, device: &Bknd::Device) 
--> Result<Vec<LFMLayer<Bknd>>, Box<dyn std::error::Error>> {
+fn build_layers<Bknd: Backend>(config: LFMConfig, tensors: &SafeTensors, device: &Bknd::Device) 
+-> Result<Vec<Transformer<Bknd>>, Box<dyn std::error::Error>> {
     let mut res = vec![];
     let mut x = 0;
 
-    for layer in config_layers {
+    for layer in config.layer_types {
         let sequence = match layer {
             ConfigLayer::Conv => {
                 Sequence::Conv(ShortConv::<Bknd> {
-                    in_proj: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.conv.in_proj.weight")?, device),
-                    out_proj: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.conv.out.weight")?, device),
-                    conv: to_tensor::<Bknd, 3>(&tensors.tensor("model.layers.{x}.conv.conv.weight")?, device),
+                    in_proj: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.conv.in_proj.weight"))?, device),
+                    out_proj: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.conv.out_proj.weight"))?, device),
+                    conv: to_tensor::<Bknd, 3>(&tensors.tensor(&format!("model.layers.{x}.conv.conv.weight"))?, device),
                 })
             },
             ConfigLayer::Attention => {
                 Sequence::Attention(SelfAttn::<Bknd> {
-                    q_proj: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.self_attn.q_proj.weight")?, device),
-                    k_proj: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.self_attn.k_proj.weight")?, device),
-                    v_proj: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.self_attn.v_proj.weight")?, device),
-                    out_proj: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.self_attn.out_proj.weight")?, device),
-                    q_norm: to_tensor::<Bknd, 1>(&tensors.tensor("model.layers.{x}.self_attn.q_layernorm.weight")?, device),
-                    k_norm: to_tensor::<Bknd, 1>(&tensors.tensor("model.layers.{x}.self_attn.k_layernorm.weight")?, device),
+                    q_proj: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.self_attn.q_proj.weight"))?, device),
+                    k_proj: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.self_attn.k_proj.weight"))?, device),
+                    v_proj: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.self_attn.v_proj.weight"))?, device),
+                    out_proj: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.self_attn.out_proj.weight"))?, device),
+                    q_norm: to_tensor::<Bknd, 1>(&tensors.tensor(&format!("model.layers.{x}.self_attn.q_layernorm.weight"))?, device),
+                    k_norm: to_tensor::<Bknd, 1>(&tensors.tensor(&format!("model.layers.{x}.self_attn.k_layernorm.weight"))?, device),
+
+                    n_heads: config.num_heads,
+                    n_kv_heads: config.num_key_value_heads,
+                    head_dim: config.hidden_size / config.num_attention_heads,
                 })
             },
         };
 
-        let layer = LFMLayer::<Bknd> {
-            w1: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.feed_forward.w1.weight")?, device),
-            w2: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.feed_forward.w2.weight")?, device),
-            w3: to_tensor::<Bknd, 2>(&tensors.tensor("model.layers.{x}.feed_forward.w3.weight")?, device),
-            ffn_norm: to_tensor::<Bknd, 1>(&tensors.tensor("model.layers.{x}.ffn_norm.weight")?, device),
-            operator_norm: to_tensor::<Bknd, 1>(&tensors.tensor("model.layers.{x}.operator_norm.weight")?, device),
+        let layer = Transformer::<Bknd> {
+            w1: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.feed_forward.w1.weight"))?, device),
+            w2: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.feed_forward.w2.weight"))?, device),
+            w3: to_tensor::<Bknd, 2>(&tensors.tensor(&format!("model.layers.{x}.feed_forward.w3.weight"))?, device),
+            ffn_norm: to_tensor::<Bknd, 1>(&tensors.tensor(&format!("model.layers.{x}.ffn_norm.weight"))?, device),
+            operator_norm: to_tensor::<Bknd, 1>(&tensors.tensor(&format!("model.layers.{x}.operator_norm.weight"))?, device),
             sequence
         };
 
@@ -93,7 +97,7 @@ pub fn load_model<Bknd: Backend>(repo_path: &Path, device: &Bknd::Device)
     let model_mmap = unsafe { Mmap::map(&model_file)? };
 
     let tensors = SafeTensors::deserialize(&model_mmap)?;
-    let layers = build_layers(model_config.layer_types, &tensors, device)?;
+    let layers = build_layers(model_config, &tensors, device)?;
 
     let tokens = to_tensor::<Bknd, 2>(&tensors.tensor("model.embed_tokens.weight")?, device);
     let norm = to_tensor::<Bknd, 1>(&tensors.tensor("model.embed_norm.weight")?, device);
