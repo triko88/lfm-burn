@@ -1,21 +1,58 @@
-use serde::Deserialize;
+use burn::config::Config;
 
-#[derive(Deserialize, Debug)]
-pub struct LFMConfig {
+#[derive(Config, Debug)]
+pub struct RopeParameters {
+    #[config(default = "\"default\".to_string()")]
+    pub rope_type: String,
+    #[config(default = "1_000_000.0")]
+    pub rope_theta: f32,
+}
+
+#[derive(Config, Debug)]
+pub struct LFMTextConfig {
+    // Dimensions
     pub hidden_size: usize,
-    pub vocab_size: usize,
+    pub intermediate_size: usize,
     pub num_hidden_layers: usize,
     pub num_heads: usize,
     pub num_key_value_heads: usize,
     pub num_attention_heads: usize,
-    pub conv_L_cache: usize,
-    pub layer_types: Vec<ConfigLayer>,
+
+    // Vocab / context
+    pub vocab_size: usize,
+    pub max_position_embeddings: usize,
+
+    // Layers for hybrid structure
+    pub layer_types: Vec<String>,
+
+    // ShortConv block
+    #[config(default = "3")]
+    pub conv_l_cache: usize,
+    #[config(default = "false")]
+    pub conv_bias: bool,
+
+    #[config(default = "1e-5")]
+    pub norm_eps: f64,
+
+    pub rope_params: RopeParameters,
+
+    // Output 
+    #[config(default = "true")]
+    pub tie_embedding: bool,
+    #[config(default = "true")]
+    pub use_pos_end: bool,
 }
 
-#[derive(Deserialize, Debug)]
-pub enum ConfigLayer {
-    #[serde(alias = "full_attention")]
-    Attention,
-    #[serde(alias = "conv")]
-    Conv,
+impl LFMTextConfig {
+    pub fn head_dim(&self) -> usize {
+        self.hidden_size / self.num_attention_heads
+    }
+
+    pub fn num_kv_groups(&self) -> usize {
+        self.num_attention_heads / self.num_key_value_heads
+    }
+
+    pub fn adjusted_ff_dim(&self) -> usize {
+        self.intermediate_size
+    }
 }

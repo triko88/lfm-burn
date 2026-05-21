@@ -1,70 +1,67 @@
-use burn::tensor::{
-    Tensor,
-    activation::softmax,
-    backend::Backend,
-    Bool,
+use burn::{
+    module::Module,
+    nn::{
+        Linear,
+        LinearConfig,
+        RmsNorm,
+        RmsNormConfig,
+    },
+    tensor::{
+        Tensor,
+        backend::Backend,
+    },
 };
 
-use crate::utils::{
-    Block,
-    rms_norm,
+use crate::{
+    config::LFMTextConfig,
+    utils::Block,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Module, Debug, Clone)]
 pub struct SelfAttn<Bknd: Backend> {
-    pub q_proj: Tensor<Bknd, 2>,
-    pub k_proj: Tensor<Bknd, 2>,
-    pub v_proj: Tensor<Bknd, 2>,
-    pub out_proj: Tensor<Bknd, 2>,
-    pub q_norm: Tensor<Bknd, 1>,
-    pub k_norm: Tensor<Bknd, 1>,
+    pub(crate) q_proj: Linear<Bknd>,
+    pub(crate) k_proj: Linear<Bknd>,
+    pub(crate) v_proj: Linear<Bknd>,
+    pub(crate) out_proj: Linear<Bknd>,
+    pub(crate) q_norm: RmsNorm<Bknd>,
+    pub(crate) k_norm: RmsNorm<Bknd>,
 
-    // Read from config.json
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub head_dim: usize,
+    pub(crate) num_q_heads: usize,
+    pub(crate) num_kv_heads: usize,
+    pub(crate) num_groups: usize,
+    pub(crate) head_dim: usize,
+    pub(crate) scale: f32,
 }
 
 impl<Bknd: Backend> Block<Bknd, 3> for SelfAttn<Bknd> {
     fn forward(&self, input: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
-        let [batch, seq_len, hidden] = input.dims();
-        let device = input.device();
+        let _ = input;
+        todo!()
+    }
+}
 
-        let heads = self.n_heads;
-        let kv_heads = self.n_kv_heads;
-        let head_dim = self.head_dim;
+impl <Bknd: Backend> SelfAttn<Bknd> {
+    pub fn new(config: &LFMTextConfig, device: &Bknd::Device) -> Self {
+        let h = config.hidden_size;
+        let d = config.head_dim();
+        let nq = config.num_attention_heads;
+        let nkv = config.num_key_value_heads;
 
-        let n_groups = heads / kv_heads;
+        Self {
+            q_proj: LinearConfig::new(h, nq * d).with_bias(false).init(device),
+            k_proj: LinearConfig::new(h, nkv * d).with_bias(false).init(device),
+            v_proj: LinearConfig::new(h, nkv * d).with_bias(false).init(device),
+            out_proj: LinearConfig::new(nq * d, h).with_bias(false).init(device),
 
-        let x = input.reshape([batch * seq_len, hidden]);
+            q_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            k_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
 
-        let q = x.clone().matmul(self.q_proj.clone()).reshape([batch, seq_len, heads, head_dim]);
-        let k = x.clone().matmul(self.k_proj.clone()).reshape([batch, seq_len, kv_heads, head_dim]);
-        let v = x.clone().matmul(self.v_proj.clone()).reshape([batch, seq_len, kv_heads, head_dim]);
-
-        let q = rms_norm(q, self.q_norm.clone(), 1e-6);
-        let k = rms_norm(k, self.k_norm.clone(), 1e-6);
-
-        let expanded = [batch, seq_len, kv_heads, n_groups, head_dim];
-        let bcast_shape = [batch, seq_len, heads, head_dim];
-
-        let k = k.unsqueeze_dim::<5>(3).expand(expanded.clone()).reshape(bcast_shape.clone());
-        let v = v.unsqueeze_dim::<5>(3).expand(expanded).reshape(bcast_shape);
-
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-
-        let scale = (head_dim as f32).sqrt();
-        let scores = q.matmul(k.swap_dims(2, 3)).div_scalar(scale);
-
-        let mask = Tensor::<Bknd, 2, Bool>::tril_mask([seq_len, seq_len], 0, &device);
-        let scores = scores.mask_fill(mask.unsqueeze::<4>(), f32::NEG_INFINITY);
-
-        let attn = softmax(scores, 3);
-        let out = attn.matmul(v).swap_dims(1, 2).reshape([batch * seq_len, heads * head_dim]);
-
-        out.matmul(self.out_proj.clone()).reshape([batch, seq_len, hidden])
+            num_q_heads: nq,
+            num_kv_heads: nkv,
+            num_groups: config.num_kv_groups(),
+            head_dim: d,
+            scale: (d as f32).powf(-0.5),
+        }
     }
 }
 
@@ -73,69 +70,144 @@ mod tests {
     use super::*;
     use burn::backend::NdArray;
     use burn::backend::ndarray::NdArrayDevice;
-    use burn::tensor::{Tensor, TensorData};
+    use burn::nn::{Initializer, LinearConfig, RmsNormConfig};
+    use burn::tensor::{Distribution, Tensor};
 
-    fn zero_attn(device: &NdArrayDevice) -> SelfAttn<NdArray> {
+    use crate::config::{LFMTextConfig, RopeParameters};
+    use crate::utils::Block;
+
+    type TB = NdArray;
+
+    fn small_config(num_attention_heads: usize, num_key_value_heads: usize, hidden_size: usize) -> LFMTextConfig {
+        LFMTextConfig {
+            hidden_size,
+            intermediate_size: 8,
+            num_hidden_layers: 1,
+            num_heads: num_attention_heads,
+            num_key_value_heads,
+            num_attention_heads,
+            vocab_size: 8,
+            max_position_embeddings: 16,
+            layer_types: vec!["full_attention".to_string()],
+            conv_l_cache: 3,
+            conv_bias: false,
+            norm_eps: 1e-5,
+            rope_params: RopeParameters {
+                rope_type: "default".to_string(),
+                rope_theta: 1_000_000.0,
+            },
+            tie_embedding: true,
+            use_pos_end: true,
+        }
+    }
+
+    fn zero_self_attn(config: &LFMTextConfig, device: &NdArrayDevice) -> SelfAttn<TB> {
+        let h = config.hidden_size;
+        let d = config.head_dim();
+        let nq = config.num_attention_heads;
+        let nkv = config.num_key_value_heads;
         SelfAttn {
-            q_proj: Tensor::zeros([4, 4], device),
-            k_proj: Tensor::zeros([4, 4], device),
-            v_proj: Tensor::zeros([4, 4], device),
-            out_proj: Tensor::zeros([4, 4], device),
-            q_norm: Tensor::zeros([4], device),
-            k_norm: Tensor::zeros([4], device),
-            n_heads: 1,
-            n_kv_heads: 1,
-            head_dim: 4,
+            q_proj: LinearConfig::new(h, nq * d).with_bias(false).with_initializer(Initializer::Zeros).init(device),
+            k_proj: LinearConfig::new(h, nkv * d).with_bias(false).with_initializer(Initializer::Zeros).init(device),
+            v_proj: LinearConfig::new(h, nkv * d).with_bias(false).with_initializer(Initializer::Zeros).init(device),
+            out_proj: LinearConfig::new(nq * d, h).with_bias(false).with_initializer(Initializer::Zeros).init(device),
+            q_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            k_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            num_q_heads: nq,
+            num_kv_heads: nkv,
+            num_groups: config.num_kv_groups(),
+            head_dim: d,
+            scale: (d as f32).powf(-0.5),
         }
     }
 
     #[test]
-    fn test_self_attn_forward_preserves_shape() {
+    fn forward_preserves_shape_3d() {
         let device = NdArrayDevice::Cpu;
-        let attn = zero_attn(&device);
-        let input: Tensor<NdArray, 3> = Tensor::zeros([2, 5, 4], &device);
-        let out = attn.forward(input);
-        assert_eq!(out.shape().dims(), [2, 5, 4]);
+        let config = small_config(2, 2, 4);
+        let attn = SelfAttn::<TB>::new(&config, &device);
+
+        let x: Tensor<TB, 3> = Tensor::random([2, 5, config.hidden_size], Distribution::Default, &device);
+        let y = attn.forward(x);
+        assert_eq!(y.dims(), [2, 5, config.hidden_size]);
     }
 
     #[test]
-    fn test_self_attn_zero_input_zero_output() {
+    fn forward_seq_len_one() {
         let device = NdArrayDevice::Cpu;
-        let attn = zero_attn(&device);
-        let input: Tensor<NdArray, 3> = Tensor::zeros([1, 3, 4], &device);
-        let out = attn.forward(input);
-        let data = out.into_data();
+        let config = small_config(2, 2, 4);
+        let attn = SelfAttn::<TB>::new(&config, &device);
+
+        let x: Tensor<TB, 3> = Tensor::random([1, 1, config.hidden_size], Distribution::Default, &device);
+        let y = attn.forward(x);
+        assert_eq!(y.dims(), [1, 1, config.hidden_size]);
+    }
+
+    #[test]
+    fn forward_zero_input_yields_zero() {
+        let device = NdArrayDevice::Cpu;
+        let config = small_config(2, 2, 4);
+        let attn = SelfAttn::<TB>::new(&config, &device);
+
+        let x: Tensor<TB, 3> = Tensor::zeros([2, 5, config.hidden_size], &device);
+        let y = attn.forward(x);
+        let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0));
     }
 
     #[test]
-    fn test_self_attn_zero_weights_nonzero_input_yields_zero() {
+    fn forward_zero_weights_yield_zero() {
         let device = NdArrayDevice::Cpu;
-        let attn = zero_attn(&device);
-        let input_data = TensorData::new(vec![1.0_f32; 12], vec![1, 3, 4]);
-        let input: Tensor<NdArray, 3> = Tensor::from_data(input_data, &device);
-        let out = attn.forward(input);
-        let data = out.into_data();
+        let config = small_config(2, 2, 4);
+        let attn = zero_self_attn(&config, &device);
+
+        let x: Tensor<TB, 3> = Tensor::random([2, 5, config.hidden_size], Distribution::Default, &device);
+        let y = attn.forward(x);
+        let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0));
     }
 
     #[test]
-    fn test_self_attn_single_token_seq() {
+    fn forward_is_causal() {
         let device = NdArrayDevice::Cpu;
-        let attn = zero_attn(&device);
-        let input: Tensor<NdArray, 3> = Tensor::zeros([1, 1, 4], &device);
-        let out = attn.forward(input);
-        assert_eq!(out.shape().dims(), [1, 1, 4]);
+        let config = small_config(2, 2, 4);
+        let attn = SelfAttn::<TB>::new(&config, &device);
+
+        let h = config.hidden_size;
+        let seq = 6usize;
+        let t = 3usize;
+
+        let x_a: Tensor<TB, 3> = Tensor::random([1, seq, h], Distribution::Default, &device);
+        let perturbation: Tensor<TB, 3> = Tensor::random([1, seq - (t + 1), h], Distribution::Default, &device);
+
+        let x_b = x_a.clone().slice_assign(
+            [0..1, (t + 1)..seq, 0..h],
+            perturbation,
+        );
+
+        let y_a = attn.forward(x_a);
+        let y_b = attn.forward(x_b);
+
+        let prefix_a = y_a.slice([0..1, 0..(t + 1), 0..h]).into_data();
+        let prefix_b = y_b.slice([0..1, 0..(t + 1), 0..h]).into_data();
+
+        assert_eq!(prefix_a.as_slice::<f32>().unwrap(), prefix_b.as_slice::<f32>().unwrap());
     }
 
     #[test]
-    fn test_self_attn_batch_dim_preserved() {
+    fn forward_gqa_broadcast() {
+        // nq=4, nkv=2, head_dim=4, hidden=16
         let device = NdArrayDevice::Cpu;
-        let attn = zero_attn(&device);
-        let input: Tensor<NdArray, 3> = Tensor::zeros([3, 2, 4], &device);
-        let out = attn.forward(input);
-        assert_eq!(out.dims()[0], 3);
+        let config = small_config(4, 2, 16);
+        let attn = SelfAttn::<TB>::new(&config, &device);
+
+        assert_eq!(attn.num_groups, 2);
+        assert_eq!(attn.head_dim, 4);
+
+        let x: Tensor<TB, 3> = Tensor::random([1, 3, config.hidden_size], Distribution::Default, &device);
+        let y = attn.forward(x);
+        assert_eq!(y.dims(), [1, 3, config.hidden_size]);
     }
 }

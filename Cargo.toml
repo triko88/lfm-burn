@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-burn = { version = "0.21.0", features = ["ndarray", "wgpu", "store"] }
+burn = { version = "0.21.0", features = ["ndarray", "wgpu"] }
+burn-store = { version = "0.21.0", features = ["safetensors", "std"] }
 bytemuck = "1.25.0"
 memmap2 = "0.9.10"
 safetensors = "0.7.0"
