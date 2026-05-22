@@ -29,8 +29,22 @@ pub struct ShortConv<Bknd: Backend> {
 
 impl<Bknd: Backend> Block<Bknd, 3> for ShortConv<Bknd> {
     fn forward(&self, input: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
-        let _ = input;
-        todo!()
+        let seqlen = input.dims()[1];
+
+        // Reshape it to [B, 3H, T]
+        let bcx = self.in_proj.forward(input).swap_dims(1, 2);
+
+        let chunks  = bcx.chunk(3, 1);      // Converts 3 tensors shaped [b, h, t]
+        let b_gate  = chunks[0].clone();
+        let c_gate  = chunks[1].clone();
+        let x_inner = chunks[2].clone();
+
+        let bx = b_gate * x_inner;
+        let conv_out = self.conv.forward(bx).narrow(2, 0, seqlen);
+        // forward makes [b, h, t + l - 1], narrow it to [b, h, t]
+
+        let y = (c_gate * conv_out).swap_dims(1, 2); // [b, t, h]
+        self.out_proj.forward(y)
     }
 }
 
