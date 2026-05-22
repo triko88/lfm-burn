@@ -6,6 +6,15 @@
   "num_attention_heads": 1,
   "num_key_value_heads": 1,
   "intermediate_size": 4,
+  "max_position_embeddings": 16,
   "conv_L_cache": 3,
-  "layer_types": ["conv", "full_attention"]
+  "conv_bias": false,
+  "norm_eps": 1e-5,
+  "layer_types": ["conv", "full_attention"],
+  "rope_params": {
+    "rope_type": "default",
+    "rope_theta": 1000000.0
+  },
+  "tie_embedding": true,
+  "use_pos_end": true
 }

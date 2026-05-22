@@ -77,7 +77,7 @@ mod tests {
             vocab_size: 8,
             max_position_embeddings: 16,
             layer_types: layer_types.into_iter().map(String::from).collect(),
-            conv_l_cache: 3,
+            conv_L_cache: 3,
             conv_bias: false,
             norm_eps: 1e-5,
             rope_params: RopeParameters {

@@ -51,7 +51,7 @@ impl<Bknd: Backend> Block<Bknd, 3> for ShortConv<Bknd> {
 impl<Bknd: Backend> ShortConv<Bknd> {
     pub fn new(config: &LFMTextConfig, device: &Bknd::Device) -> Self {
         let h = config.hidden_size;
-        let l = config.conv_l_cache;
+        let l = config.conv_L_cache;
 
         let conv = Conv1dConfig::new(h, h, l)
             .with_groups(h)
@@ -98,7 +98,7 @@ mod tests {
             vocab_size: 8,
             max_position_embeddings: 16,
             layer_types: vec!["conv".to_string()],
-            conv_l_cache: 3,
+            conv_L_cache: 3,
             conv_bias: false,
             norm_eps: 1e-5,
             rope_params: RopeParameters {
@@ -112,7 +112,7 @@ mod tests {
 
     fn zero_short_conv(config: &LFMTextConfig, device: &NdArrayDevice) -> ShortConv<TB> {
         let h = config.hidden_size;
-        let l = config.conv_l_cache;
+        let l = config.conv_L_cache;
         let conv = Conv1dConfig::new(h, h, l)
             .with_groups(h)
             .with_padding(PaddingConfig1d::Explicit(l - 1, 0))

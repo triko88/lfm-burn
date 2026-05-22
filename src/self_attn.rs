@@ -19,12 +19,12 @@ use crate::{
 
 #[derive(Module, Debug, Clone)]
 pub struct SelfAttn<Bknd: Backend> {
-    pub(crate) q_proj: Linear<Bknd>,
-    pub(crate) k_proj: Linear<Bknd>,
-    pub(crate) v_proj: Linear<Bknd>,
-    pub(crate) out_proj: Linear<Bknd>,
-    pub(crate) q_norm: RmsNorm<Bknd>,
-    pub(crate) k_norm: RmsNorm<Bknd>,
+    q_proj: Linear<Bknd>,
+    k_proj: Linear<Bknd>,
+    v_proj: Linear<Bknd>,
+    out_proj: Linear<Bknd>,
+    q_norm: RmsNorm<Bknd>,
+    k_norm: RmsNorm<Bknd>,
 
     pub(crate) num_q_heads: usize,
     pub(crate) num_kv_heads: usize,
@@ -89,7 +89,7 @@ mod tests {
             vocab_size: 8,
             max_position_embeddings: 16,
             layer_types: vec!["full_attention".to_string()],
-            conv_l_cache: 3,
+            conv_L_cache: 3,
             conv_bias: false,
             norm_eps: 1e-5,
             rope_params: RopeParameters {

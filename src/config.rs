@@ -27,7 +27,8 @@ pub struct LFMTextConfig {
 
     // ShortConv block
     #[config(default = "3")]
-    pub conv_l_cache: usize,
+    #[allow(non_snake_case)]
+    pub conv_L_cache: usize,
     #[config(default = "false")]
     pub conv_bias: bool,
 

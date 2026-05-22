@@ -1,8 +1,11 @@
 use burn::{
     module::Module,
+    config::Config,
     nn::{
         Embedding,
+        EmbeddingConfig,
         RmsNorm,
+        RmsNormConfig,
     },
     tensor::{
         Int,
@@ -11,13 +14,37 @@ use burn::{
     },
 };
 
-use crate::decoder::LFMDecoder;
+use crate::{
+    decoder::LFMDecoder,
+    config::LFMTextConfig,
+};
+
+use burn_store::{ModuleSnapshot, SafetensorsStore};
 
 #[derive(Module, Debug, Clone)]
 pub struct LFMText<Bknd: Backend> {
-    pub(crate) embed_tokens: Embedding<Bknd>,
-    pub(crate) layers: Vec<LFMDecoder<Bknd>>,
-    pub(crate) embedding_norm: RmsNorm<Bknd>,
+    embed_tokens: Embedding<Bknd>,
+    layers: Vec<LFMDecoder<Bknd>>,
+    embedding_norm: RmsNorm<Bknd>,
+}
+
+impl LFMTextConfig {
+    pub fn init<Bknd: Backend>(&self, device: &Bknd::Device) -> LFMText<Bknd> {
+        let embed_tokens = EmbeddingConfig::new(self.vocab_size, self.hidden_size)
+            .init(device);
+        let layers = (0..self.num_hidden_layers)
+            .map(|i| LFMDecoder::new(self, i, device))
+            .collect();
+        let embedding_norm = RmsNormConfig::new(self.hidden_size)
+            .with_epsilon(self.norm_eps)
+            .init(device);
+
+        LFMText {
+            embed_tokens,
+            layers,
+            embedding_norm,
+        }
+    }
 }
 
 impl <Bknd: Backend> LFMText<Bknd> {
@@ -26,14 +53,18 @@ impl <Bknd: Backend> LFMText<Bknd> {
         todo!()
     }
 
-    pub fn from_pretrained(_dir: &str, _device: &Bknd::Device)
+    pub fn from_pretrained(dir: &str, device: &Bknd::Device)
         -> Result<Self, Box<dyn std::error::Error>>
     {
-        // Red-phase stub. Green phase will:
-        // 1. Load `{dir}/config.json` into LFMTextConfig via serde_json.
-        // 2. Construct the module tree from the config.
-        // 3. Load weights from `{dir}/model.safetensors` via burn_store.
-        todo!()
+        let config = LFMTextConfig::load(format!("{dir}/config.json"))?;
+        let model = config.init::<Bknd>(device);
+
+        let mut store = SafetensorsStore::from_file(format!("{dir}/model.safetensors"))
+                        .with_key_remapping(r"^model\.", "").allow_partial(true);
+
+        let mut model = model;
+        <LFMText<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
+        Ok(model)
     }
 }
 
@@ -61,7 +92,7 @@ mod tests {
             vocab_size: 8,
             max_position_embeddings: 16,
             layer_types: vec!["conv".to_string(), "full_attention".to_string()],
-            conv_l_cache: 3,
+            conv_L_cache: 3,
             conv_bias: false,
             norm_eps: 1e-5,
             rope_params: RopeParameters {
