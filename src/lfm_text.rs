@@ -60,7 +60,11 @@ impl <Bknd: Backend> LFMText<Bknd> {
         let model = config.init::<Bknd>(device);
 
         let mut store = SafetensorsStore::from_file(format!("{dir}/model.safetensors"))
-                        .with_key_remapping(r"^model\.", "").allow_partial(true);
+            .with_key_remapping(r"^model\.", "")
+            .with_key_remapping(r"feed_forward\.w1\.weight", "swiglu.linear_gate.weight")
+            .with_key_remapping(r"feed_forward\.w3\.weight", "swiglu.linear_up.weight")
+            .with_key_remapping(r"feed_forward\.w2\.weight", "swiglu.linear_down.weight")
+            .allow_partial(true);
 
         let mut model = model;
         <LFMText<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
