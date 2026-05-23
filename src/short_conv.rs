@@ -14,7 +14,7 @@ use burn::{
 
 use crate::{
     config::LFMTextConfig,
-    utils::Block,
+    layer::{AttnContext, Block, LayerCache},
 };
 
 #[derive(Module, Debug, Clone)]
@@ -27,8 +27,44 @@ pub struct ShortConv<Bknd: Backend> {
     hidden_size: usize,
 }
 
-impl<Bknd: Backend> Block<Bknd, 3> for ShortConv<Bknd> {
-    fn forward(&self, input: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
+#[derive(Debug)]
+pub struct ConvCache<Bknd: Backend> {
+    window: Tensor<Bknd, 3>,
+    seeded: bool,
+}
+
+impl<Bknd: Backend> ConvCache<Bknd> {
+    fn push(&mut self, bx_col: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
+        let k = self.window.dims()[2];
+        let kept = self.window.clone().narrow(2, 1, k - 1);
+        self.window = Tensor::cat(vec![kept, bx_col], 2);
+
+        self.window.clone()
+    }
+
+    fn seed(&mut self, bx: Tensor<Bknd, 3>, device: &Bknd::Device) {
+        let [b, d, l] = bx.dims();
+        let k = self.window.dims()[2];
+
+        self.window = if l >= k {
+            bx.narrow(2, l - k, k)
+        } else {
+            Tensor::cat(vec![Tensor::zeros([b, d, k - 1], device)], 2)
+        };
+
+        self.seeded = true;
+    }
+}
+
+impl<Bknd: Backend> Block<Bknd> for ShortConv<Bknd> {
+    fn forward(
+        &self,
+        input: Tensor<Bknd, 3>,
+        ctx: Option<AttnContext<Bknd>>,
+        cache: Option<&mut LayerCache<Bknd>>,
+    ) -> Tensor<Bknd, 3> {
+        let _ = ctx;
+        let device = input.device();
         let seqlen = input.dims()[1];
 
         // Reshape it to [B, 3H, T]
@@ -40,7 +76,24 @@ impl<Bknd: Backend> Block<Bknd, 3> for ShortConv<Bknd> {
         let x_inner = chunks[2].clone();
 
         let bx = b_gate * x_inner;
-        let conv_out = self.conv.forward(bx).narrow(2, 0, seqlen);
+        let conv_out = match cache {
+            Some(LayerCache::ConvCache(c)) if c.seeded => {
+                // Decode => calculate for Single token, depthwise dot product over the window.
+                let window = c.push(bx);
+                let [d, _, k] = self.conv.weight.val().dims();
+                let kernel = self.conv.weight.val().reshape([1, d, k]);
+                window.matmul(kernel).sum_dim(2)
+            },
+            Some(LayerCache::ConvCache(c)) => {
+                // Prefill => Run the convolution, seed the window
+                let seqlen = bx.dims()[2];
+                let out = self.conv.forward(bx.clone()).narrow(2, 0, seqlen);
+                c.seed(bx, &device);
+
+                out
+            },
+            _ => self.conv.forward(bx).narrow(2, 0, seqlen),
+        };
         // forward makes [b, h, t + l - 1], narrow it to [b, h, t]
 
         let y = (c_gate * conv_out).swap_dims(1, 2); // [b, t, h]
@@ -83,7 +136,6 @@ mod tests {
     use burn::tensor::{Distribution, Tensor};
 
     use crate::config::{LFMTextConfig, RopeParameters};
-    use crate::utils::Block;
 
     type TB = NdArray;
 
@@ -142,7 +194,7 @@ mod tests {
 
         for s in [1usize, 5, 8] {
             let x: Tensor<TB, 3> = Tensor::random([2, s, config.hidden_size], Distribution::Default, &device);
-            let y = conv.forward(x);
+            let y = conv.forward(x, None, None);
             assert_eq!(y.dims(), [2, s, config.hidden_size]);
         }
     }
@@ -154,7 +206,7 @@ mod tests {
         let conv = ShortConv::<TB>::new(&config, &device);
 
         let x: Tensor<TB, 3> = Tensor::zeros([2, 5, config.hidden_size], &device);
-        let y = conv.forward(x);
+        let y = conv.forward(x, None, None);
         let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0));
@@ -167,7 +219,7 @@ mod tests {
         let conv = zero_short_conv(&config, &device);
 
         let x: Tensor<TB, 3> = Tensor::random([2, 5, config.hidden_size], Distribution::Default, &device);
-        let y = conv.forward(x);
+        let y = conv.forward(x, None, None);
         let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0));
@@ -191,8 +243,8 @@ mod tests {
             perturbation,
         );
 
-        let y_a = conv.forward(x_a);
-        let y_b = conv.forward(x_b);
+        let y_a = conv.forward(x_a, None, None);
+        let y_b = conv.forward(x_b, None, None);
 
         let prefix_a = y_a.slice([0..1, 0..(t + 1), 0..h]).into_data();
         let prefix_b = y_b.slice([0..1, 0..(t + 1), 0..h]).into_data();
@@ -211,10 +263,10 @@ mod tests {
         let row_1: Tensor<TB, 3> = Tensor::random([1, 4, h], Distribution::Default, &device);
 
         let batched = Tensor::cat(vec![row_0.clone(), row_1.clone()], 0);
-        let y_batched = conv.forward(batched);
+        let y_batched = conv.forward(batched, None, None);
 
-        let y_solo_0 = conv.forward(row_0);
-        let y_solo_1 = conv.forward(row_1);
+        let y_solo_0 = conv.forward(row_0, None, None);
+        let y_solo_1 = conv.forward(row_1, None, None);
 
         let y_batched_0 = y_batched.clone().slice([0..1, 0..4, 0..h]).into_data();
         let y_batched_1 = y_batched.slice([1..2, 0..4, 0..h]).into_data();

@@ -7,7 +7,7 @@ use burn::backend::NdArray;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::tensor::{Int, Tensor};
 
-use lfm_burn::LFMText;
+use lfm_rs::LFMText;
 
 type TB = NdArray;
 
