@@ -2,6 +2,7 @@ use burn::tensor::{
     Tensor,
     backend::Backend,
     Bool,
+    Int,
 };
 
 use crate::{
@@ -28,4 +29,37 @@ pub trait Block<Bknd: Backend> {
         cache: Option<&mut LayerCache<Bknd>>,
     ) -> Tensor<Bknd, 3>;
     // For both types of layers, the tensors are shaped (B, L, D) -> (B, L, D)
+}
+
+fn rotate_half<Bknd: Backend>(x: Tensor<Bknd, 4>) -> Tensor<Bknd, 4> {
+    let d = x.dims()[3];
+    let x1 = x.clone().narrow(3, 0, d/2);
+    let x2 = x.narrow(3, d/2, d/2);
+
+    Tensor::cat(vec![-x2, x1], 3)
+}
+
+pub fn apply_rope<Bknd: Backend>(x: Tensor<Bknd, 4>, cos: Tensor<Bknd, 3>, sin: Tensor<Bknd, 3>) 
+-> Tensor<Bknd, 4> {
+    let cos = cos.unsqueeze_dim::<4>(1);
+    let sin = sin.unsqueeze_dim::<4>(1);
+
+    x.clone() * cos + rotate_half(x) * sin
+}
+
+pub fn rope_tables<Bknd: Backend>(
+    past: usize, seq: usize, d_h: usize, 
+    theta: f64, dev: &Bknd::Device) 
+-> (Tensor<Bknd, 3>, Tensor<Bknd, 3>) {
+
+    let half = d_h / 2;
+    let inv: Vec<f32> = (0..half)
+        .map(|x| 1.0 / theta.powf(x as f64 / d_h as f64) as f32).collect();
+    let inv = Tensor::<Bknd, 1>::from_floats(inv.as_slice(), dev).reshape([1, half]);
+    let pos = Tensor::<Bknd, 1, Int>::arange(past as i64..(past + seq) as i64, dev)
+        .float().reshape([1, seq]);
+    let freqs = pos.matmul(inv);
+    let emb = Tensor::cat(vec![freqs.clone(), freqs], 1);
+
+    (emb.clone().cos().unsqueeze_dim::<3>(0), emb.sin().unsqueeze_dim::<3>(0))
 }

@@ -76,7 +76,7 @@ mod tests {
         let cos: Tensor<TB, 3> = Tensor::ones([1, seq, head_dim], device);
         let sin: Tensor<TB, 3> = Tensor::zeros([1, seq, head_dim], device);
         let mask_data: Vec<bool> = (0..seq)
-            .flat_map(|i| (0..seq).map(move |j| j <= i))
+            .flat_map(|i| (0..seq).map(move |j| j > i))
             .collect();
         let mask: Tensor<TB, 4, Bool> =
             Tensor::from_data(TensorData::new(mask_data, [1, 1, seq, seq]), device);

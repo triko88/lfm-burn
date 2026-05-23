@@ -9,13 +9,42 @@ use burn::{
     tensor::{
         Tensor,
         backend::Backend,
+        activation::softmax,
     },
 };
 
 use crate::{
     config::LFMTextConfig,
-    utils::Block,
+    layer::{AttnContext, Block, LayerCache, apply_rope},
 };
+
+#[derive(Debug)]
+pub struct AttnCache<Bknd: Backend> {
+    k: Option<Tensor<Bknd, 4>>,
+    v: Option<Tensor<Bknd, 4>>,
+    len: usize,
+}
+
+impl <Bknd: Backend> AttnCache<Bknd> {
+    fn append(&mut self, k_new: Tensor<Bknd, 4>, v_new: Tensor<Bknd, 4>)
+    -> (Tensor<Bknd, 4>, Tensor<Bknd, 4>) {
+        let k = match self.k.take() {
+            Some(k) => Tensor::cat(vec![k, k_new], 2),
+            None => k_new,
+        };
+
+        let v = match self.v.take() {
+            Some(v) => Tensor::cat(vec![v, v_new], 2),
+            None => v_new,
+        };
+
+        self.len = k.dims()[2];
+        self.k = Some(k.clone());
+        self.v = Some(v.clone());
+
+        (k, v)
+    }
+}
 
 #[derive(Module, Debug, Clone)]
 pub struct SelfAttn<Bknd: Backend> {
@@ -26,6 +55,7 @@ pub struct SelfAttn<Bknd: Backend> {
     q_norm: RmsNorm<Bknd>,
     k_norm: RmsNorm<Bknd>,
 
+    pub(crate) num_heads: usize,
     pub(crate) num_q_heads: usize,
     pub(crate) num_kv_heads: usize,
     pub(crate) num_groups: usize,
@@ -33,10 +63,48 @@ pub struct SelfAttn<Bknd: Backend> {
     pub(crate) scale: f32,
 }
 
-impl<Bknd: Backend> Block<Bknd, 3> for SelfAttn<Bknd> {
-    fn forward(&self, input: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
-        let _ = input;
-        todo!()
+impl<Bknd: Backend> Block<Bknd> for SelfAttn<Bknd> {
+    fn forward(
+        &self,
+        input: Tensor<Bknd, 3>,
+        ctx: Option<AttnContext<Bknd>>,
+        cache: Option<&mut LayerCache<Bknd>>,
+    ) -> Tensor<Bknd, 3> {
+        let [batch, seqlen, hidden] = input.dims();
+        let qh = self.num_q_heads;
+        let kvh = self.num_kv_heads;
+        let h = self.head_dim;
+
+        let ctx = ctx.expect("AttnContext required");
+
+        let q = self.q_proj.forward(input.clone()).reshape([batch, seqlen, qh, h]);
+        let k = self.k_proj.forward(input.clone()).reshape([batch, seqlen, kvh, h]);
+        let v = self.v_proj.forward(input).reshape([batch, seqlen, kvh, h]);
+
+        let q = apply_rope(self.q_norm.forward(q.swap_dims(1, 2)), ctx.cos.clone(), ctx.sin.clone());
+        let k = apply_rope(self.k_norm.forward(k.swap_dims(1, 2)), ctx.cos.clone(), ctx.sin.clone());
+        let v = v.swap_dims(1, 2);
+
+        let (k, v) = match cache {
+            Some(LayerCache::AttnCache(c)) => c.append(k, v),
+            _ => (k, v),
+        };
+
+        let expanded_dims = [batch, kvh, self.num_groups, seqlen, h];
+        let repeat_dims = [batch, self.num_heads, seqlen, h];
+
+        let k = k.unsqueeze_dim::<5>(2).expand(expanded_dims).reshape(repeat_dims);
+        let v = v.unsqueeze_dim::<5>(2).expand(expanded_dims).reshape(repeat_dims);
+
+        let mut scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(self.scale);
+        if let Some(mask) = ctx.mask.clone() {
+            scores = scores.mask_fill(mask, f32::NEG_INFINITY);
+        }
+
+        let attn = softmax(scores, 3);
+        let out = attn.matmul(v).swap_dims(1, 2).reshape([batch * seqlen, self.num_heads * h]);
+
+        self.out_proj.forward(out).reshape([batch, seqlen, hidden])
     }
 }
 
@@ -56,6 +124,7 @@ impl <Bknd: Backend> SelfAttn<Bknd> {
             q_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
             k_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
 
+            num_heads: config.num_heads,
             num_q_heads: nq,
             num_kv_heads: nkv,
             num_groups: config.num_kv_groups(),
@@ -74,7 +143,19 @@ mod tests {
     use burn::tensor::{Distribution, Tensor};
 
     use crate::config::{LFMTextConfig, RopeParameters};
-    use crate::utils::Block;
+    use crate::layer::AttnContext;
+    use burn::tensor::{Bool, TensorData};
+
+    fn placeholder_ctx(seq: usize, head_dim: usize, device: &NdArrayDevice) -> AttnContext<TB> {
+        let cos: Tensor<TB, 3> = Tensor::ones([1, seq, head_dim], device);
+        let sin: Tensor<TB, 3> = Tensor::zeros([1, seq, head_dim], device);
+        let mask_data: Vec<bool> = (0..seq)
+            .flat_map(|i| (0..seq).map(move |j| j > i))
+            .collect();
+        let mask: Tensor<TB, 4, Bool> =
+            Tensor::from_data(TensorData::new(mask_data, [1, 1, seq, seq]), device);
+        AttnContext { cos, sin, mask: Some(mask) }
+    }
 
     type TB = NdArray;
 
@@ -113,6 +194,7 @@ mod tests {
             out_proj: LinearConfig::new(nq * d, h).with_bias(false).with_initializer(Initializer::Zeros).init(device),
             q_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
             k_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            num_heads: config.num_heads,
             num_q_heads: nq,
             num_kv_heads: nkv,
             num_groups: config.num_kv_groups(),
@@ -128,7 +210,8 @@ mod tests {
         let attn = SelfAttn::<TB>::new(&config, &device);
 
         let x: Tensor<TB, 3> = Tensor::random([2, 5, config.hidden_size], Distribution::Default, &device);
-        let y = attn.forward(x);
+        let ctx = placeholder_ctx(5, config.head_dim(), &device);
+        let y = attn.forward(x, Some(ctx), None);
         assert_eq!(y.dims(), [2, 5, config.hidden_size]);
     }
 
@@ -139,7 +222,8 @@ mod tests {
         let attn = SelfAttn::<TB>::new(&config, &device);
 
         let x: Tensor<TB, 3> = Tensor::random([1, 1, config.hidden_size], Distribution::Default, &device);
-        let y = attn.forward(x);
+        let ctx = placeholder_ctx(1, config.head_dim(), &device);
+        let y = attn.forward(x, Some(ctx), None);
         assert_eq!(y.dims(), [1, 1, config.hidden_size]);
     }
 
@@ -150,7 +234,8 @@ mod tests {
         let attn = SelfAttn::<TB>::new(&config, &device);
 
         let x: Tensor<TB, 3> = Tensor::zeros([2, 5, config.hidden_size], &device);
-        let y = attn.forward(x);
+        let ctx = placeholder_ctx(5, config.head_dim(), &device);
+        let y = attn.forward(x, Some(ctx), None);
         let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0));
@@ -163,7 +248,8 @@ mod tests {
         let attn = zero_self_attn(&config, &device);
 
         let x: Tensor<TB, 3> = Tensor::random([2, 5, config.hidden_size], Distribution::Default, &device);
-        let y = attn.forward(x);
+        let ctx = placeholder_ctx(5, config.head_dim(), &device);
+        let y = attn.forward(x, Some(ctx), None);
         let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0));
@@ -187,8 +273,10 @@ mod tests {
             perturbation,
         );
 
-        let y_a = attn.forward(x_a);
-        let y_b = attn.forward(x_b);
+        let ctx_a = placeholder_ctx(seq, config.head_dim(), &device);
+        let ctx_b = placeholder_ctx(seq, config.head_dim(), &device);
+        let y_a = attn.forward(x_a, Some(ctx_a), None);
+        let y_b = attn.forward(x_b, Some(ctx_b), None);
 
         let prefix_a = y_a.slice([0..1, 0..(t + 1), 0..h]).into_data();
         let prefix_b = y_b.slice([0..1, 0..(t + 1), 0..h]).into_data();
@@ -207,7 +295,8 @@ mod tests {
         assert_eq!(attn.head_dim, 4);
 
         let x: Tensor<TB, 3> = Tensor::random([1, 3, config.hidden_size], Distribution::Default, &device);
-        let y = attn.forward(x);
+        let ctx = placeholder_ctx(3, config.head_dim(), &device);
+        let y = attn.forward(x, Some(ctx), None);
         assert_eq!(y.dims(), [1, 3, config.hidden_size]);
     }
 }
