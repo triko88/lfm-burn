@@ -18,7 +18,7 @@ fn loads_test_repo_and_runs_forward() {
         LFMText::from_pretrained("test_repo", &device).expect("from_pretrained");
 
     let ids: Tensor<TB, 2, Int> = Tensor::zeros([1, 4], &device);
-    let y = model.forward(ids);
+    let y = model.forward(ids, None);
 
     let dims = y.dims();
     assert_eq!(dims[0], 1);

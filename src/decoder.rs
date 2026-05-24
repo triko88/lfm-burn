@@ -42,6 +42,10 @@ impl<Bknd: Backend> Block<Bknd> for LFMDecoder<Bknd> {
 }
 
 impl <Bknd: Backend> LFMDecoder<Bknd> {
+    pub fn is_attn(&self) -> bool {
+        matches!(self.layer, Layer::Attn(_))
+    }
+
     pub fn new(config: &LFMTextConfig, layer_idx: usize, device: &Bknd::Device) -> Self {
         let layer = match config.layer_types[layer_idx].as_str() {
             "conv" => Layer::Conv(ShortConv::new(config, device)),
@@ -68,17 +72,12 @@ mod tests {
     use burn::tensor::{Distribution, Tensor};
 
     use crate::config::{LFMTextConfig, RopeParameters};
-    use crate::layer::AttnContext;
-    use burn::tensor::{Bool, TensorData};
+    use crate::layer::{causal_mask, AttnContext};
 
     fn placeholder_ctx(seq: usize, head_dim: usize, device: &NdArrayDevice) -> AttnContext<TB> {
         let cos: Tensor<TB, 3> = Tensor::ones([1, seq, head_dim], device);
         let sin: Tensor<TB, 3> = Tensor::zeros([1, seq, head_dim], device);
-        let mask_data: Vec<bool> = (0..seq)
-            .flat_map(|i| (0..seq).map(move |j| j > i))
-            .collect();
-        let mask: Tensor<TB, 4, Bool> =
-            Tensor::from_data(TensorData::new(mask_data, [1, 1, seq, seq]), device);
+        let mask = causal_mask::<TB>(seq, 0, device);
         AttnContext { cos, sin, mask: Some(mask) }
     }
 

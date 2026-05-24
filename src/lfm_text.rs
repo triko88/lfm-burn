@@ -17,6 +17,7 @@ use burn::{
 use crate::{
     decoder::LFMDecoder,
     config::LFMTextConfig,
+    layer::{causal_mask, rope_tables, AttnContext, Block, LayerCache},
 };
 
 use burn_store::{ModuleSnapshot, SafetensorsStore};
@@ -26,6 +27,15 @@ pub struct LFMText<Bknd: Backend> {
     embed_tokens: Embedding<Bknd>,
     layers: Vec<LFMDecoder<Bknd>>,
     embedding_norm: RmsNorm<Bknd>,
+
+    // RoPE
+    head_dim: usize,
+    rope_theta: f32,
+}
+
+pub struct LFMCache<Bknd: Backend> {
+    pub layers: Vec<LayerCache<Bknd>>,
+    pub position: usize,
 }
 
 impl LFMTextConfig {
@@ -43,14 +53,41 @@ impl LFMTextConfig {
             embed_tokens,
             layers,
             embedding_norm,
+            head_dim: self.head_dim(),
+            rope_theta: self.rope_params.rope_theta,
         }
     }
 }
 
 impl <Bknd: Backend> LFMText<Bknd> {
-    pub fn forward(&self, token_ids: Tensor<Bknd, 2, Int>) -> Tensor<Bknd, 3> {
-        let _ = token_ids;
-        todo!()
+    pub fn forward(
+        &self,
+        token_ids: Tensor<Bknd, 2, Int>,
+        mut cache: Option<&mut LFMCache<Bknd>>,
+    ) -> Tensor<Bknd, 3> {
+        let seq = token_ids.dims()[1];
+        let device = token_ids.device();
+
+        let past = cache.as_deref().map_or(0, |c| c.position);
+        let theta = self.rope_theta as f64;
+
+        let x = self.embed_tokens.forward(token_ids);
+
+        let (cos, sin) = rope_tables::<Bknd>(past, seq, self.head_dim, theta, &device);
+        let mask = causal_mask::<Bknd>(seq, past, &device);
+
+        let x = self.layers.iter().enumerate().fold(x, |x, (idx, layer)| {
+            let local_cache = cache.as_deref_mut().map(|c| &mut c.layers[idx]);
+            let ctx = layer.is_attn().then(|| AttnContext {
+                cos: cos.clone(),
+                sin: sin.clone(),
+                mask: Some(mask.clone()),
+            });
+
+            layer.forward(x, ctx, local_cache)
+        });
+
+        self.embedding_norm.forward(x)
     }
 
     pub fn from_pretrained(dir: &str, device: &Bknd::Device)
@@ -65,6 +102,7 @@ impl <Bknd: Backend> LFMText<Bknd> {
 
         let mut model = model;
         <LFMText<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
+
         Ok(model)
     }
 }
@@ -121,6 +159,8 @@ mod tests {
             embed_tokens,
             layers,
             embedding_norm,
+            head_dim: config.head_dim(),
+            rope_theta: config.rope_params.rope_theta,
         }
     }
 
@@ -142,7 +182,7 @@ mod tests {
         let model = build_synthetic_model(&config, &device, false);
 
         let ids: Tensor<TB, 2, Int> = Tensor::zeros([2, 5], &device);
-        let y = model.forward(ids);
+        let y = model.forward(ids, None);
         let dims = y.dims();
         assert_output_shape_is_hidden_or_vocab(&dims, 2, 5, &config);
     }
@@ -158,7 +198,7 @@ mod tests {
         let model = build_synthetic_model(&config, &device, true);
 
         let ids: Tensor<TB, 2, Int> = Tensor::zeros([1, 4], &device);
-        let y = model.forward(ids);
+        let y = model.forward(ids, None);
         let data = y.into_data();
         let slice = data.as_slice::<f32>().unwrap();
         assert!(slice.iter().all(|&v| v == 0.0), "expected all-zero output, got {:?}", slice);
@@ -178,8 +218,8 @@ mod tests {
         // Mutate position t+1 onward.
         let ids_b: Tensor<TB, 2, Int> = Tensor::from_data([[1i64, 2, 3, 7, 6]], &device);
 
-        let y_a = model.forward(ids_a);
-        let y_b = model.forward(ids_b);
+        let y_a = model.forward(ids_a, None);
+        let y_b = model.forward(ids_b, None);
         let last = y_a.dims()[2];
 
         let prefix_a = y_a.slice([0..1, 0..(t + 1), 0..last]).into_data();
@@ -200,9 +240,9 @@ mod tests {
         let row_1: Tensor<TB, 2, Int> = Tensor::from_data([[3i64, 4]], &device);
         let batched = Tensor::cat(vec![row_0.clone(), row_1.clone()], 0);
 
-        let y_batched = model.forward(batched);
-        let y_solo_0 = model.forward(row_0);
-        let y_solo_1 = model.forward(row_1);
+        let y_batched = model.forward(batched, None);
+        let y_solo_0 = model.forward(row_0, None);
+        let y_solo_1 = model.forward(row_1, None);
 
         let last = y_batched.dims()[2];
         let y_batched_0 = y_batched.clone().slice([0..1, 0..2, 0..last]).into_data();

@@ -74,6 +74,15 @@ pub fn apply_rope<Bknd: Backend>(x: Tensor<Bknd, 4>, cos: Tensor<Bknd, 3>, sin: 
     x.clone() * cos + rotate_half(x) * sin
 }
 
+pub fn causal_mask<Bknd: Backend>(
+    seq: usize,
+    past: usize,
+    device: &Bknd::Device,
+) -> Tensor<Bknd, 4, Bool> {
+    Tensor::<Bknd, 2, Bool>::tril_mask([seq, past + seq], past as i64, device)
+        .unsqueeze::<4>()
+}
+
 pub fn rope_tables<Bknd: Backend>(
     past: usize, seq: usize, d_h: usize, 
     theta: f64, dev: &Bknd::Device) 
@@ -84,7 +93,7 @@ pub fn rope_tables<Bknd: Backend>(
         .map(|x| 1.0 / theta.powf(x as f64 / d_h as f64) as f32).collect();
     let inv = Tensor::<Bknd, 1>::from_floats(inv.as_slice(), dev).reshape([1, half]);
     let pos = Tensor::<Bknd, 1, Int>::arange(past as i64..(past + seq) as i64, dev)
-        .float().reshape([1, seq]);
+        .float().reshape([seq, 1]);
     let freqs = pos.matmul(inv);
     let emb = Tensor::cat(vec![freqs.clone(), freqs], 1);
 
