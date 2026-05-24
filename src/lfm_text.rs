@@ -117,6 +117,7 @@ mod tests {
 
     use crate::config::{LFMTextConfig, RopeParameters};
     use crate::decoder::LFMDecoder;
+    use crate::layer::LayerCache;
 
     type TB = NdArray;
 
@@ -265,5 +266,93 @@ mod tests {
         let model: LFMText<TB> = LFMText::from_pretrained("test_repo", &device).expect("load");
         // test_repo/config.json declares 2 layers (conv, full_attention).
         assert_eq!(model.layers.len(), 2);
+    }
+
+    // A.1 — lm_head shape
+    #[test]
+    fn lm_head_projects_to_vocab() {
+        let device = NdArrayDevice::Cpu;
+        let config = hybrid_config();
+        let model = build_synthetic_model(&config, &device, false);
+
+        let hidden: Tensor<TB, 3> = Tensor::zeros([2, 5, config.hidden_size], &device);
+        let logits = model.lm_head(hidden);
+        assert_eq!(logits.dims(), [2, 5, config.vocab_size]);
+    }
+
+    // A.2 — lm_head uses tied embedding weights
+    #[test]
+    fn lm_head_matches_manual_weight_multiply() {
+        let device = NdArrayDevice::Cpu;
+        let config = hybrid_config(); // hidden_size=4, vocab_size=8
+        let model = build_synthetic_model(&config, &device, false);
+
+        let hidden: Tensor<TB, 3> = Tensor::ones([1, 2, config.hidden_size], &device);
+        let logits = model.lm_head(hidden.clone());
+
+        // Manually reproduce: logits = hidden @ embed_tokens.weight.T
+        let w = model.embed_tokens.weight.val(); // [V, H]
+        let [b, t, h] = hidden.dims();
+        let v = w.dims()[0];
+        let expected = hidden
+            .reshape([b * t, h])
+            .matmul(w.transpose())
+            .reshape([b, t, v]);
+
+        assert_eq!(
+            logits.into_data().as_slice::<f32>().unwrap(),
+            expected.into_data().as_slice::<f32>().unwrap(),
+        );
+    }
+
+    // A.3 — regression lock: forward returns hidden states, not logits
+    #[test]
+    fn forward_returns_hidden_states_not_logits() {
+        let device = NdArrayDevice::Cpu;
+        let config = hybrid_config();
+        let model = build_synthetic_model(&config, &device, false);
+        let ids: Tensor<TB, 2, Int> = Tensor::zeros([2, 5], &device);
+        let y = model.forward(ids, None);
+        assert_eq!(y.dims(), [2, 5, config.hidden_size]);
+    }
+
+    // A.4 — LFMCache::empty layer count
+    #[test]
+    fn cache_empty_layer_count_matches_model() {
+        let device = NdArrayDevice::Cpu;
+        let config = hybrid_config(); // 2 layers: conv + full_attention
+        let model = build_synthetic_model(&config, &device, false);
+        let cache = LFMCache::empty(&model, &device);
+        assert_eq!(cache.layers.len(), config.num_hidden_layers);
+        assert_eq!(cache.position, 0);
+    }
+
+    // A.4 — LFMCache::empty variant types
+    #[test]
+    fn cache_empty_variants_match_layer_types() {
+        let device = NdArrayDevice::Cpu;
+        let config = hybrid_config();
+        let model = build_synthetic_model(&config, &device, false);
+        let cache = LFMCache::empty(&model, &device);
+        assert!(matches!(cache.layers[0], LayerCache::ConvCache(_)));
+        assert!(matches!(cache.layers[1], LayerCache::AttnCache(_)));
+    }
+
+    // A.5 — forward advances cache.position
+    #[test]
+    fn forward_with_cache_advances_position() {
+        let device = NdArrayDevice::Cpu;
+        let config = hybrid_config();
+        let model = build_synthetic_model(&config, &device, false);
+        let mut cache = LFMCache::empty(&model, &device);
+        assert_eq!(cache.position, 0);
+
+        let ids: Tensor<TB, 2, Int> = Tensor::zeros([1, 5], &device);
+        let _ = model.forward(ids, Some(&mut cache));
+        assert_eq!(cache.position, 5);
+
+        let next: Tensor<TB, 2, Int> = Tensor::zeros([1, 1], &device);
+        let _ = model.forward(next, Some(&mut cache));
+        assert_eq!(cache.position, 6);
     }
 }
