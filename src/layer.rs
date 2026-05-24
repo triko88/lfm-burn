@@ -1,3 +1,4 @@
+use burn::module::Module;
 use burn::tensor::{
     Tensor,
     backend::Backend,
@@ -6,8 +7,14 @@ use burn::tensor::{
 };
 
 use crate::{
-    short_conv::ConvCache,
-    self_attn::AttnCache,
+    short_conv::{
+        ConvCache,
+        ShortConv,
+    },
+    self_attn::{
+        AttnCache,
+        SelfAttn,
+    },
 };
 
 pub struct AttnContext<Bknd: Backend> {
@@ -21,6 +28,12 @@ pub enum LayerCache<Bknd: Backend> {
     AttnCache(AttnCache<Bknd>),
 }
 
+#[derive(Module, Debug, Clone)]
+pub enum Layer<Bknd: Backend> {
+    Conv(ShortConv<Bknd>),
+    Attn(SelfAttn<Bknd>),
+}
+
 pub trait Block<Bknd: Backend> {
     fn forward(
         &self,
@@ -29,6 +42,20 @@ pub trait Block<Bknd: Backend> {
         cache: Option<&mut LayerCache<Bknd>>,
     ) -> Tensor<Bknd, 3>;
     // For both types of layers, the tensors are shaped (B, L, D) -> (B, L, D)
+}
+
+impl <Bknd: Backend> Block<Bknd> for Layer<Bknd> {
+    fn forward(
+        &self,
+        input: Tensor<Bknd, 3>,
+        ctx: Option<AttnContext<Bknd>>,
+        cache: Option<&mut LayerCache<Bknd>>,
+    ) -> Tensor<Bknd, 3> {
+        match self {
+            Layer::Conv(obj) => obj.forward(input, ctx, cache),
+            Layer::Attn(obj) => obj.forward(input, ctx, cache),
+        }
+    }
 }
 
 fn rotate_half<Bknd: Backend>(x: Tensor<Bknd, 4>) -> Tensor<Bknd, 4> {

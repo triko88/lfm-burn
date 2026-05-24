@@ -3,8 +3,6 @@ use burn::{
     nn::{
         RmsNorm,
         RmsNormConfig,
-        SwiGlu,
-        SwiGluConfig,
     },
     tensor::{
         Tensor,
@@ -14,16 +12,16 @@ use burn::{
 
 use crate::{
     config::LFMTextConfig,
-    layer::{AttnContext, Block, LayerCache},
+    layer::{AttnContext, Block, Layer, LayerCache},
     self_attn::SelfAttn,
     short_conv::ShortConv,
+    mlp::MLP,
 };
 
 #[derive(Module, Debug, Clone)]
 pub struct LFMDecoder<Bknd: Backend> {
-    conv: Option<ShortConv<Bknd>>,
-    self_attn: Option<SelfAttn<Bknd>>,
-    feed_forward: SwiGlu<Bknd>,
+    layer: Layer<Bknd>,
+    feed_forward: MLP<Bknd>,
     operator_norm: RmsNorm<Bknd>,
     ffn_norm: RmsNorm<Bknd>,
 }
@@ -35,24 +33,25 @@ impl<Bknd: Backend> Block<Bknd> for LFMDecoder<Bknd> {
         ctx: Option<AttnContext<Bknd>>,
         cache: Option<&mut LayerCache<Bknd>>,
     ) -> Tensor<Bknd, 3> {
-        let _ = (input, ctx, cache);
-        todo!()
+        let hidden = self.layer.forward(self.operator_norm.forward(input.clone()), ctx, cache);
+        let input = input + hidden;
+        let feed = self.feed_forward.forward(self.ffn_norm.forward(input.clone()));
+
+        input + feed
     }
 }
 
 impl <Bknd: Backend> LFMDecoder<Bknd> {
     pub fn new(config: &LFMTextConfig, layer_idx: usize, device: &Bknd::Device) -> Self {
-        let (conv, self_attn) = match config.layer_types[layer_idx].as_str() {
-            "conv" => (Some(ShortConv::new(config, device)), None),
-            "full_attention" => (None, Some(SelfAttn::new(config, device))),
+        let layer = match config.layer_types[layer_idx].as_str() {
+            "conv" => Layer::Conv(ShortConv::new(config, device)),
+            "full_attention" => Layer::Attn(SelfAttn::new(config, device)),
             _ => panic!("unknown layer_type at index {layer_idx}"),
         };
 
         Self {
-            conv,
-            self_attn,
-            feed_forward: SwiGluConfig::new(config.hidden_size, config.intermediate_size)
-                .init(device),
+            layer,
+            feed_forward: MLP::new(config, device),
             operator_norm: RmsNormConfig::new(config.hidden_size)
                 .with_epsilon(config.norm_eps).init(device),
             ffn_norm: RmsNormConfig::new(config.hidden_size)
@@ -199,8 +198,7 @@ mod tests {
         let config = small_config(vec!["conv"]);
         let dec = LFMDecoder::<TB>::new(&config, 0, &device);
 
-        assert!(dec.conv.is_some(), "conv branch must be Some for layer_type='conv'");
-        assert!(dec.self_attn.is_none(), "self_attn branch must be None for layer_type='conv'");
+        assert!(matches!(&dec.layer, Layer::Conv(_)), "layer must be Conv for layer_type='conv'");
     }
 
     #[test]
@@ -209,8 +207,7 @@ mod tests {
         let config = small_config(vec!["full_attention"]);
         let dec = LFMDecoder::<TB>::new(&config, 0, &device);
 
-        assert!(dec.conv.is_none(), "conv branch must be None for layer_type='full_attention'");
-        assert!(dec.self_attn.is_some(), "self_attn branch must be Some for layer_type='full_attention'");
+        assert!(matches!(&dec.layer, Layer::Attn(_)), "layer must be Attn for layer_type='full_attention'");
     }
 
     #[test]
@@ -219,7 +216,7 @@ mod tests {
         let config = small_config(vec!["conv"]);
         let dec = LFMDecoder::<TB>::new(&config, 0, &device);
 
-        let conv = dec.conv.as_ref().expect("conv hydrated");
+        let Layer::Conv(conv) = &dec.layer else { panic!("expected Conv layer") };
         let x: Tensor<TB, 3> = Tensor::zeros([1, 3, config.hidden_size], &device);
         let y = conv.forward(x, None, None);
         assert_eq!(y.dims(), [1, 3, config.hidden_size]);
@@ -231,7 +228,7 @@ mod tests {
         let config = small_config(vec!["full_attention"]);
         let dec = LFMDecoder::<TB>::new(&config, 0, &device);
 
-        let attn = dec.self_attn.as_ref().expect("self_attn hydrated");
+        let Layer::Attn(attn) = &dec.layer else { panic!("expected Attn layer") };
         let x: Tensor<TB, 3> = Tensor::zeros([1, 3, config.hidden_size], &device);
         let ctx = placeholder_ctx(3, config.head_dim(), &device);
         let y = attn.forward(x, Some(ctx), None);
@@ -239,14 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn hydrates_feed_forward_hidden_to_intermediate() {
+    fn hydrates_feed_forward_preserves_hidden_size() {
         let device = NdArrayDevice::Cpu;
         let config = small_config(vec!["conv"]);
         let dec = LFMDecoder::<TB>::new(&config, 0, &device);
 
         let x: Tensor<TB, 3> = Tensor::zeros([1, 2, config.hidden_size], &device);
         let y = dec.feed_forward.forward(x);
-        assert_eq!(y.dims(), [1, 2, config.intermediate_size]);
+        assert_eq!(y.dims(), [1, 2, config.hidden_size]);
     }
 
     #[test]
