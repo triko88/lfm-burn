@@ -2,6 +2,9 @@
 name = "lfm-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A lightweight inference engine for Liquid Foundation Models (LFM), made with Rust"
+license = "MIT"
+readme = "README.md"
 
 [dependencies]
 burn = { version = "0.21.0", features = ["ndarray", "wgpu"] }
