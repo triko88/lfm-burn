@@ -13,7 +13,7 @@ use burn::{
 };
 
 use crate::{
-    config::LFMTextConfig,
+    config::TextModelConfig,
     layer::{AttnContext, Block, LayerCache},
 };
 
@@ -34,6 +34,13 @@ pub struct ConvCache<Bknd: Backend> {
 }
 
 impl<Bknd: Backend> ConvCache<Bknd> {
+    pub fn init(hidden_size: usize, l_cache: usize, device: &Bknd::Device) -> Self {
+        Self {
+            window: Tensor::zeros([1, hidden_size, l_cache - 1], device),
+            seeded: false,
+        }
+    }
+
     fn push(&mut self, bx_col: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
         let k = self.window.dims()[2];
         let kept = self.window.clone().narrow(2, 1, k - 1);
@@ -102,7 +109,11 @@ impl<Bknd: Backend> Block<Bknd> for ShortConv<Bknd> {
 }
 
 impl<Bknd: Backend> ShortConv<Bknd> {
-    pub fn new(config: &LFMTextConfig, device: &Bknd::Device) -> Self {
+    pub(crate) fn cache_dims(&self) -> (usize, usize) {
+        (self.hidden_size, self.l_cache)
+    }
+
+    pub fn new(config: &TextModelConfig, device: &Bknd::Device) -> Self {
         let h = config.hidden_size;
         let l = config.conv_L_cache;
 
@@ -135,12 +146,12 @@ mod tests {
     };
     use burn::tensor::{Distribution, Tensor};
 
-    use crate::config::{LFMTextConfig, RopeParameters};
+    use crate::config::{TextModelConfig, RopeParameters};
 
     type TB = NdArray;
 
-    fn small_config() -> LFMTextConfig {
-        LFMTextConfig {
+    fn small_config() -> TextModelConfig {
+        TextModelConfig {
             hidden_size: 4,
             intermediate_size: 8,
             num_hidden_layers: 1,
@@ -159,10 +170,11 @@ mod tests {
             },
             tie_embedding: true,
             use_pos_end: true,
+            eos_token_id: None,
         }
     }
 
-    fn zero_short_conv(config: &LFMTextConfig, device: &NdArrayDevice) -> ShortConv<TB> {
+    fn zero_short_conv(config: &TextModelConfig, device: &NdArrayDevice) -> ShortConv<TB> {
         let h = config.hidden_size;
         let l = config.conv_L_cache;
         let conv = Conv1dConfig::new(h, h, l)

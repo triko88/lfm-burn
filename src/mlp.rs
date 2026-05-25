@@ -4,7 +4,7 @@ use burn::{
     tensor::{Tensor, backend::Backend, activation::silu},
 };
 
-use crate::config::LFMTextConfig;
+use crate::config::TextModelConfig;
 
 #[derive(Module, Debug, Clone)]
 pub struct MLP<Bknd: Backend> {
@@ -14,7 +14,7 @@ pub struct MLP<Bknd: Backend> {
 }
 
 impl<Bknd: Backend> MLP<Bknd> {
-    pub fn new(config: &LFMTextConfig, device: &Bknd::Device) -> Self {
+    pub fn new(config: &TextModelConfig, device: &Bknd::Device) -> Self {
         let hidden = config.hidden_size;
         let intermediate = config.intermediate_size;
 
@@ -40,12 +40,12 @@ mod tests {
     use burn::backend::ndarray::NdArrayDevice;
     use burn::tensor::{Distribution, Tensor, activation::silu};
 
-    use crate::config::{LFMTextConfig, RopeParameters};
+    use crate::config::{TextModelConfig, RopeParameters};
 
     type TB = NdArray;
 
-    fn small_config() -> LFMTextConfig {
-        LFMTextConfig {
+    fn small_config() -> TextModelConfig {
+        TextModelConfig {
             hidden_size: 4,
             intermediate_size: 8,
             num_hidden_layers: 1,

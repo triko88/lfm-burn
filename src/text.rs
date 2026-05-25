@@ -16,14 +16,16 @@ use burn::{
 
 use crate::{
     decoder::LFMDecoder,
-    config::LFMTextConfig,
+    config::TextModelConfig,
+    short_conv::ConvCache,
+    self_attn::AttnCache,
     layer::{causal_mask, rope_tables, AttnContext, Block, LayerCache},
 };
 
 use burn_store::{ModuleSnapshot, SafetensorsStore};
 
 #[derive(Module, Debug, Clone)]
-pub struct LFMText<Bknd: Backend> {
+pub struct TextModel<Bknd: Backend> {
     embed_tokens: Embedding<Bknd>,
     layers: Vec<LFMDecoder<Bknd>>,
     embedding_norm: RmsNorm<Bknd>,
@@ -38,8 +40,28 @@ pub struct LFMCache<Bknd: Backend> {
     pub position: usize,
 }
 
-impl LFMTextConfig {
-    pub fn init<Bknd: Backend>(&self, device: &Bknd::Device) -> LFMText<Bknd> {
+impl <Bknd: Backend> LFMCache <Bknd> {
+    pub fn init(model: &TextModel<Bknd>, device: &Bknd::Device) -> Self {
+        let layers = model.layers.iter().map(|dec| {
+            if dec.is_attn() {
+                LayerCache::AttnCache(AttnCache::init())
+            } else {
+                let (h, l) = dec.conv_cache_dims()
+                    .expect("non-attn decoder must have conv cache dims");
+
+                LayerCache::ConvCache(ConvCache::init(h, l, device))
+            }
+        }).collect();
+
+        Self {
+            layers,
+            position: 0,
+        }
+    }
+}
+
+impl TextModelConfig {
+    pub fn init<Bknd: Backend>(&self, device: &Bknd::Device) -> TextModel<Bknd> {
         let embed_tokens = EmbeddingConfig::new(self.vocab_size, self.hidden_size)
             .init(device);
         let layers = (0..self.num_hidden_layers)
@@ -49,7 +71,7 @@ impl LFMTextConfig {
             .with_epsilon(self.norm_eps)
             .init(device);
 
-        LFMText {
+        TextModel {
             embed_tokens,
             layers,
             embedding_norm,
@@ -59,7 +81,7 @@ impl LFMTextConfig {
     }
 }
 
-impl <Bknd: Backend> LFMText<Bknd> {
+impl <Bknd: Backend> TextModel<Bknd> {
     pub fn forward(
         &self,
         token_ids: Tensor<Bknd, 2, Int>,
@@ -87,13 +109,26 @@ impl <Bknd: Backend> LFMText<Bknd> {
             layer.forward(x, ctx, local_cache)
         });
 
-        self.embedding_norm.forward(x)
+        let out = self.embedding_norm.forward(x);
+        if let Some(c) = cache {
+            c.position += seq;
+        }
+
+        out
+    }
+
+    pub fn lm_head(&self, hidden: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
+        let w = self.embed_tokens.weight.val();
+        let [b, t, h] = hidden.dims();
+        let v = w.dims()[0];
+
+        hidden.reshape([b * t, h]).matmul(w.transpose()).reshape([b, t, v])
     }
 
     pub fn from_pretrained(dir: &str, device: &Bknd::Device)
         -> Result<Self, Box<dyn std::error::Error>>
     {
-        let config = LFMTextConfig::load(format!("{dir}/config.json"))?;
+        let config = TextModelConfig::load(format!("{dir}/config.json"))?;
         let model = config.init::<Bknd>(device);
 
         let mut store = SafetensorsStore::from_file(format!("{dir}/model.safetensors"))
@@ -101,7 +136,7 @@ impl <Bknd: Backend> LFMText<Bknd> {
             .allow_partial(true);
 
         let mut model = model;
-        <LFMText<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
+        <TextModel<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
 
         Ok(model)
     }
@@ -115,14 +150,14 @@ mod tests {
     use burn::nn::{EmbeddingConfig, Initializer, RmsNormConfig};
     use burn::tensor::{Int, Tensor};
 
-    use crate::config::{LFMTextConfig, RopeParameters};
+    use crate::config::{TextModelConfig, RopeParameters};
     use crate::decoder::LFMDecoder;
     use crate::layer::LayerCache;
 
     type TB = NdArray;
 
-    fn hybrid_config() -> LFMTextConfig {
-        LFMTextConfig {
+    fn hybrid_config() -> TextModelConfig {
+        TextModelConfig {
             hidden_size: 4,
             intermediate_size: 8,
             num_hidden_layers: 2,
@@ -141,10 +176,11 @@ mod tests {
             },
             tie_embedding: true,
             use_pos_end: true,
+            eos_token_id: None,
         }
     }
 
-    fn build_synthetic_model(config: &LFMTextConfig, device: &NdArrayDevice, zero_embed: bool) -> LFMText<TB> {
+    fn build_synthetic_model(config: &TextModelConfig, device: &NdArrayDevice, zero_embed: bool) -> TextModel<TB> {
         let embed_init = if zero_embed { Initializer::Zeros } else { Initializer::Normal { mean: 0.0, std: 1.0 } };
         let embed_tokens = EmbeddingConfig::new(config.vocab_size, config.hidden_size)
             .with_initializer(embed_init)
@@ -156,7 +192,7 @@ mod tests {
             .with_epsilon(config.norm_eps)
             .init(device);
 
-        LFMText {
+        TextModel {
             embed_tokens,
             layers,
             embedding_norm,
@@ -165,7 +201,7 @@ mod tests {
         }
     }
 
-    fn assert_output_shape_is_hidden_or_vocab(dims: &[usize], expected_batch: usize, expected_seq: usize, config: &LFMTextConfig) {
+    fn assert_output_shape_is_hidden_or_vocab(dims: &[usize], expected_batch: usize, expected_seq: usize, config: &TextModelConfig) {
         assert_eq!(dims[0], expected_batch);
         assert_eq!(dims[1], expected_seq);
         let last = dims[2];
@@ -256,14 +292,14 @@ mod tests {
     #[test]
     fn from_pretrained_loads_test_repo() {
         let device = NdArrayDevice::Cpu;
-        let result: Result<LFMText<TB>, _> = LFMText::from_pretrained("test_repo", &device);
+        let result: Result<TextModel<TB>, _> = TextModel::from_pretrained("test_repo", &device);
         assert!(result.is_ok(), "from_pretrained failed: {:?}", result.err().map(|e| e.to_string()));
     }
 
     #[test]
     fn from_pretrained_layer_count_matches_config() {
         let device = NdArrayDevice::Cpu;
-        let model: LFMText<TB> = LFMText::from_pretrained("test_repo", &device).expect("load");
+        let model: TextModel<TB> = TextModel::from_pretrained("test_repo", &device).expect("load");
         // test_repo/config.json declares 2 layers (conv, full_attention).
         assert_eq!(model.layers.len(), 2);
     }

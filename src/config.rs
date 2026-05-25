@@ -9,7 +9,7 @@ pub struct RopeParameters {
 }
 
 #[derive(Config, Debug)]
-pub struct LFMTextConfig {
+pub struct TextModelConfig {
     // Dimensions
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -42,9 +42,11 @@ pub struct LFMTextConfig {
     pub tie_embedding: bool,
     #[config(default = "true")]
     pub use_pos_end: bool,
+    #[config(default = "None")]
+    pub eos_token_id: Option<u32>,
 }
 
-impl LFMTextConfig {
+impl TextModelConfig {
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }

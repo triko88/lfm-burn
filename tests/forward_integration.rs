@@ -1,5 +1,5 @@
 // End-to-end integration test: load the test_repo fixture and run forward on a
-// small token tensor. The crate must expose `LFMText` publicly for this file to
+// small token tensor. The crate must expose `TextModel` publicly for this file to
 // compile — that export is a green-phase prerequisite tracked alongside the
 // other compile-error preconditions in the test plan.
 
@@ -7,15 +7,15 @@ use burn::backend::NdArray;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::tensor::{Int, Tensor};
 
-use lfm_rs::LFMText;
+use lfm_rs::TextModel;
 
 type TB = NdArray;
 
 #[test]
 fn loads_test_repo_and_runs_forward() {
     let device = NdArrayDevice::Cpu;
-    let model: LFMText<TB> =
-        LFMText::from_pretrained("test_repo", &device).expect("from_pretrained");
+    let model: TextModel<TB> =
+        TextModel::from_pretrained("test_repo", &device).expect("from_pretrained");
 
     let ids: Tensor<TB, 2, Int> = Tensor::zeros([1, 4], &device);
     let y = model.forward(ids, None);

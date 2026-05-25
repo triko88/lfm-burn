@@ -14,7 +14,7 @@ use burn::{
 };
 
 use crate::{
-    config::LFMTextConfig,
+    config::TextModelConfig,
     layer::{AttnContext, Block, LayerCache, apply_rope},
 };
 
@@ -26,6 +26,10 @@ pub struct AttnCache<Bknd: Backend> {
 }
 
 impl <Bknd: Backend> AttnCache<Bknd> {
+    pub fn init() -> Self {
+        Self { k: None, v: None, len: 0 }
+    }
+
     fn append(&mut self, k_new: Tensor<Bknd, 4>, v_new: Tensor<Bknd, 4>)
     -> (Tensor<Bknd, 4>, Tensor<Bknd, 4>) {
         let k = match self.k.take() {
@@ -109,7 +113,7 @@ impl<Bknd: Backend> Block<Bknd> for SelfAttn<Bknd> {
 }
 
 impl <Bknd: Backend> SelfAttn<Bknd> {
-    pub fn new(config: &LFMTextConfig, device: &Bknd::Device) -> Self {
+    pub fn new(config: &TextModelConfig, device: &Bknd::Device) -> Self {
         let h = config.hidden_size;
         let d = config.head_dim();
         let nq = config.num_attention_heads;
@@ -142,7 +146,7 @@ mod tests {
     use burn::nn::{Initializer, LinearConfig, RmsNormConfig};
     use burn::tensor::{Distribution, Tensor};
 
-    use crate::config::{LFMTextConfig, RopeParameters};
+    use crate::config::{TextModelConfig, RopeParameters};
     use crate::layer::{causal_mask, AttnContext};
 
     fn placeholder_ctx(seq: usize, head_dim: usize, device: &NdArrayDevice) -> AttnContext<TB> {
@@ -154,8 +158,8 @@ mod tests {
 
     type TB = NdArray;
 
-    fn small_config(num_attention_heads: usize, num_key_value_heads: usize, hidden_size: usize) -> LFMTextConfig {
-        LFMTextConfig {
+    fn small_config(num_attention_heads: usize, num_key_value_heads: usize, hidden_size: usize) -> TextModelConfig {
+        TextModelConfig {
             hidden_size,
             intermediate_size: 8,
             num_hidden_layers: 1,
@@ -174,10 +178,11 @@ mod tests {
             },
             tie_embedding: true,
             use_pos_end: true,
+            eos_token_id: None,
         }
     }
 
-    fn zero_self_attn(config: &LFMTextConfig, device: &NdArrayDevice) -> SelfAttn<TB> {
+    fn zero_self_attn(config: &TextModelConfig, device: &NdArrayDevice) -> SelfAttn<TB> {
         let h = config.hidden_size;
         let d = config.head_dim();
         let nq = config.num_attention_heads;

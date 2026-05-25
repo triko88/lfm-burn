@@ -4,6 +4,6 @@ mod self_attn;
 mod short_conv;
 mod layer;
 mod mlp;
-pub mod lfm_text;
+pub mod text;
 
-pub use lfm_text::LFMText;
+pub use text::TextModel;

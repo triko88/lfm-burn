@@ -11,7 +11,7 @@ use burn::{
 };
 
 use crate::{
-    config::LFMTextConfig,
+    config::TextModelConfig,
     layer::{AttnContext, Block, Layer, LayerCache},
     self_attn::SelfAttn,
     short_conv::ShortConv,
@@ -46,7 +46,14 @@ impl <Bknd: Backend> LFMDecoder<Bknd> {
         matches!(self.layer, Layer::Attn(_))
     }
 
-    pub fn new(config: &LFMTextConfig, layer_idx: usize, device: &Bknd::Device) -> Self {
+    pub(crate) fn conv_cache_dims(&self) -> Option<(usize, usize)> {
+        match &self.layer {
+            Layer::Conv(c) => Some(c.cache_dims()),
+            Layer::Attn(_) => None,
+        }
+    }
+
+    pub fn new(config: &TextModelConfig, layer_idx: usize, device: &Bknd::Device) -> Self {
         let layer = match config.layer_types[layer_idx].as_str() {
             "conv" => Layer::Conv(ShortConv::new(config, device)),
             "full_attention" => Layer::Attn(SelfAttn::new(config, device)),
@@ -71,7 +78,7 @@ mod tests {
     use burn::backend::ndarray::NdArrayDevice;
     use burn::tensor::{Distribution, Tensor};
 
-    use crate::config::{LFMTextConfig, RopeParameters};
+    use crate::config::{TextModelConfig, RopeParameters};
     use crate::layer::{causal_mask, AttnContext};
 
     fn placeholder_ctx(seq: usize, head_dim: usize, device: &NdArrayDevice) -> AttnContext<TB> {
@@ -83,8 +90,8 @@ mod tests {
 
     type TB = NdArray;
 
-    fn small_config(layer_types: Vec<&str>) -> LFMTextConfig {
-        LFMTextConfig {
+    fn small_config(layer_types: Vec<&str>) -> TextModelConfig {
+        TextModelConfig {
             hidden_size: 4,
             intermediate_size: 8,
             num_hidden_layers: layer_types.len(),
@@ -103,6 +110,7 @@ mod tests {
             },
             tie_embedding: true,
             use_pos_end: true,
+            eos_token_id: None,
         }
     }
 
