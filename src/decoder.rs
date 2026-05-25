@@ -18,12 +18,12 @@ use crate::{
     mlp::MLP,
 };
 
-#[derive(Module, Debug, Clone)]
-pub struct LFMDecoder<Bknd: Backend> {
-    layer: Layer<Bknd>,
-    feed_forward: MLP<Bknd>,
-    operator_norm: RmsNorm<Bknd>,
-    ffn_norm: RmsNorm<Bknd>,
+#[derive(Module, Debug)]
+pub struct LFMDecoder<B: Backend> {
+    layer: Layer<B>,
+    feed_forward: MLP<B>,
+    operator_norm: RmsNorm<B>,
+    ffn_norm: RmsNorm<B>,
 }
 
 impl<Bknd: Backend> Block<Bknd> for LFMDecoder<Bknd> {

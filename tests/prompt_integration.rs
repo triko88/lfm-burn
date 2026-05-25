@@ -1,11 +1,11 @@
 use burn::backend::{NdArray, ndarray::NdArrayDevice};
-use lfm_rs::Lfm;
+use lfm_rs::LFMText;
 
 // A.8 — prompt() returns a non-empty string
 #[tokio::test]
 async fn prompt_returns_non_empty_string() {
     let device = NdArrayDevice::Cpu;
-    let lfm = Lfm::<NdArray>::from_pretrained("test_repo", &device)
+    let lfm = LFMText::<NdArray>::from_pretrained("test_repo", &device)
         .expect("from_pretrained should succeed")
         .with_max_tokens(4);
     let out = lfm.prompt("hello").await.expect("prompt should succeed");
@@ -16,7 +16,7 @@ async fn prompt_returns_non_empty_string() {
 #[tokio::test]
 async fn prompt_respects_max_tokens() {
     let device = NdArrayDevice::Cpu;
-    let lfm = Lfm::<NdArray>::from_pretrained("test_repo", &device)
+    let lfm = LFMText::<NdArray>::from_pretrained("test_repo", &device)
         .expect("from_pretrained should succeed")
         .with_max_tokens(2);
     let out = lfm.prompt("hello").await.expect("prompt should succeed");

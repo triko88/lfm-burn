@@ -6,11 +6,11 @@ use burn::{
 
 use crate::config::TextModelConfig;
 
-#[derive(Module, Debug, Clone)]
-pub struct MLP<Bknd: Backend> {
-    w1: Linear<Bknd>,
-    w3: Linear<Bknd>,
-    w2: Linear<Bknd>,
+#[derive(Module, Debug)]
+pub struct MLP<B: Backend> {
+    w1: Linear<B>,
+    w3: Linear<B>,
+    w2: Linear<B>,
 }
 
 impl<Bknd: Backend> MLP<Bknd> {
@@ -64,6 +64,7 @@ mod tests {
             },
             tie_embedding: true,
             use_pos_end: true,
+            eos_token_id: None,
         }
     }
 

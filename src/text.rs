@@ -24,11 +24,11 @@ use crate::{
 
 use burn_store::{ModuleSnapshot, SafetensorsStore};
 
-#[derive(Module, Debug, Clone)]
-pub struct TextModel<Bknd: Backend> {
-    embed_tokens: Embedding<Bknd>,
-    layers: Vec<LFMDecoder<Bknd>>,
-    embedding_norm: RmsNorm<Bknd>,
+#[derive(Module, Debug)]
+pub struct TextModel<B: Backend> {
+    embed_tokens: Embedding<B>,
+    layers: Vec<LFMDecoder<B>>,
+    embedding_norm: RmsNorm<B>,
 
     // RoPE
     head_dim: usize,
@@ -129,14 +129,36 @@ impl <Bknd: Backend> TextModel<Bknd> {
         -> Result<Self, Box<dyn std::error::Error>>
     {
         let config = TextModelConfig::load(format!("{dir}/config.json"))?;
-        let model = config.init::<Bknd>(device);
+        let mut model = config.init::<Bknd>(device);
 
+        // The checkpoint uses the HF LFM2 key layout; remap it onto this crate's
+        // burn module paths:
+        //   - strip the leading `model.`
+        //   - the per-layer operator submodule is named `conv`/`self_attn` in the
+        //     checkpoint but is a single `layer` field (a `Layer` enum) here
+        //   - burn's RmsNorm stores its scale as `gamma`, not `weight`
+        // `skip_enum_variants(true)` drops the `Conv`/`Attn` enum-variant names so
+        // the operator path is just `layers.N.layer.<...>`.
         let mut store = SafetensorsStore::from_file(format!("{dir}/model.safetensors"))
             .with_key_remapping(r"^model\.", "")
-            .allow_partial(true);
+            .with_key_remapping(r"^embed_norm\.", "embedding_norm.")
+            .with_key_remapping(r"\.conv\.", ".layer.")
+            .with_key_remapping(r"\.self_attn\.", ".layer.")
+            .with_key_remapping(r"norm\.weight$", "norm.gamma")
+            .skip_enum_variants(true)
+            .allow_partial(false);
 
-        let mut model = model;
-        <TextModel<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
+        let result = <TextModel<Bknd> as ModuleSnapshot<Bknd>>::load_from(&mut model, &mut store)?;
+        if !result.missing.is_empty() || !result.unused.is_empty() || !result.errors.is_empty() {
+            return Err(format!(
+                "incomplete weight load: applied={}, missing={:?}, unused={:?}, errors={:?}",
+                result.applied.len(),
+                result.missing.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+                result.unused,
+                result.errors,
+            )
+            .into());
+        }
 
         Ok(model)
     }
@@ -352,24 +374,24 @@ mod tests {
         assert_eq!(y.dims(), [2, 5, config.hidden_size]);
     }
 
-    // A.4 — LFMCache::empty layer count
+    // A.4 — LFMCache::init layer count
     #[test]
     fn cache_empty_layer_count_matches_model() {
         let device = NdArrayDevice::Cpu;
         let config = hybrid_config(); // 2 layers: conv + full_attention
         let model = build_synthetic_model(&config, &device, false);
-        let cache = LFMCache::empty(&model, &device);
+        let cache = LFMCache::init(&model, &device);
         assert_eq!(cache.layers.len(), config.num_hidden_layers);
         assert_eq!(cache.position, 0);
     }
 
-    // A.4 — LFMCache::empty variant types
+    // A.4 — LFMCache::init variant types
     #[test]
     fn cache_empty_variants_match_layer_types() {
         let device = NdArrayDevice::Cpu;
         let config = hybrid_config();
         let model = build_synthetic_model(&config, &device, false);
-        let cache = LFMCache::empty(&model, &device);
+        let cache = LFMCache::init(&model, &device);
         assert!(matches!(cache.layers[0], LayerCache::ConvCache(_)));
         assert!(matches!(cache.layers[1], LayerCache::AttnCache(_)));
     }
@@ -380,7 +402,7 @@ mod tests {
         let device = NdArrayDevice::Cpu;
         let config = hybrid_config();
         let model = build_synthetic_model(&config, &device, false);
-        let mut cache = LFMCache::empty(&model, &device);
+        let mut cache = LFMCache::init(&model, &device);
         assert_eq!(cache.position, 0);
 
         let ids: Tensor<TB, 2, Int> = Tensor::zeros([1, 5], &device);

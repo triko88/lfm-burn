@@ -50,14 +50,14 @@ impl <Bknd: Backend> AttnCache<Bknd> {
     }
 }
 
-#[derive(Module, Debug, Clone)]
-pub struct SelfAttn<Bknd: Backend> {
-    q_proj: Linear<Bknd>,
-    k_proj: Linear<Bknd>,
-    v_proj: Linear<Bknd>,
-    out_proj: Linear<Bknd>,
-    q_norm: RmsNorm<Bknd>,
-    k_norm: RmsNorm<Bknd>,
+#[derive(Module, Debug)]
+pub struct SelfAttn<B: Backend> {
+    q_proj: Linear<B>,
+    k_proj: Linear<B>,
+    v_proj: Linear<B>,
+    out_proj: Linear<B>,
+    q_layernorm: RmsNorm<B>,
+    k_layernorm: RmsNorm<B>,
 
     pub(crate) num_heads: usize,
     pub(crate) num_q_heads: usize,
@@ -85,8 +85,8 @@ impl<Bknd: Backend> Block<Bknd> for SelfAttn<Bknd> {
         let k = self.k_proj.forward(input.clone()).reshape([batch, seqlen, kvh, h]);
         let v = self.v_proj.forward(input).reshape([batch, seqlen, kvh, h]);
 
-        let q = apply_rope(self.q_norm.forward(q.swap_dims(1, 2)), ctx.cos.clone(), ctx.sin.clone());
-        let k = apply_rope(self.k_norm.forward(k.swap_dims(1, 2)), ctx.cos.clone(), ctx.sin.clone());
+        let q = apply_rope(self.q_layernorm.forward(q.swap_dims(1, 2)), ctx.cos.clone(), ctx.sin.clone());
+        let k = apply_rope(self.k_layernorm.forward(k.swap_dims(1, 2)), ctx.cos.clone(), ctx.sin.clone());
         let v = v.swap_dims(1, 2);
 
         let (k, v) = match cache {
@@ -94,8 +94,11 @@ impl<Bknd: Backend> Block<Bknd> for SelfAttn<Bknd> {
             _ => (k, v),
         };
 
-        let expanded_dims = [batch, kvh, self.num_groups, seqlen, h];
-        let repeat_dims = [batch, self.num_heads, seqlen, h];
+        // After cache append, K/V span the full accumulated length, which differs
+        // from the query seqlen during decode. Expand over the K/V length.
+        let kv_len = k.dims()[2];
+        let expanded_dims = [batch, kvh, self.num_groups, kv_len, h];
+        let repeat_dims = [batch, self.num_heads, kv_len, h];
 
         let k = k.unsqueeze_dim::<5>(2).expand(expanded_dims).reshape(repeat_dims);
         let v = v.unsqueeze_dim::<5>(2).expand(expanded_dims).reshape(repeat_dims);
@@ -125,8 +128,8 @@ impl <Bknd: Backend> SelfAttn<Bknd> {
             v_proj: LinearConfig::new(h, nkv * d).with_bias(false).init(device),
             out_proj: LinearConfig::new(nq * d, h).with_bias(false).init(device),
 
-            q_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
-            k_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            q_layernorm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            k_layernorm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
 
             num_heads: config.num_heads,
             num_q_heads: nq,
@@ -192,8 +195,8 @@ mod tests {
             k_proj: LinearConfig::new(h, nkv * d).with_bias(false).with_initializer(Initializer::Zeros).init(device),
             v_proj: LinearConfig::new(h, nkv * d).with_bias(false).with_initializer(Initializer::Zeros).init(device),
             out_proj: LinearConfig::new(nq * d, h).with_bias(false).with_initializer(Initializer::Zeros).init(device),
-            q_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
-            k_norm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            q_layernorm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
+            k_layernorm: RmsNormConfig::new(d).with_epsilon(config.norm_eps).init(device),
             num_heads: config.num_heads,
             num_q_heads: nq,
             num_kv_heads: nkv,

@@ -28,10 +28,10 @@ pub enum LayerCache<Bknd: Backend> {
     AttnCache(AttnCache<Bknd>),
 }
 
-#[derive(Module, Debug, Clone)]
-pub enum Layer<Bknd: Backend> {
-    Conv(ShortConv<Bknd>),
-    Attn(SelfAttn<Bknd>),
+#[derive(Module, Debug)]
+pub enum Layer<B: Backend> {
+    Conv(ShortConv<B>),
+    Attn(SelfAttn<B>),
 }
 
 pub trait Block<Bknd: Backend> {
@@ -41,7 +41,7 @@ pub trait Block<Bknd: Backend> {
         ctx: Option<AttnContext<Bknd>>,
         cache: Option<&mut LayerCache<Bknd>>,
     ) -> Tensor<Bknd, 3>;
-    // For both types of layers, the tensors are shaped (B, L, D) -> (B, L, D)
+    // For both types of layers, the tensors are shaped (Bknd, L, D) -> (Bknd, L, D)
 }
 
 impl <Bknd: Backend> Block<Bknd> for Layer<Bknd> {

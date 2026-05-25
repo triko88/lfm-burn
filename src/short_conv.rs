@@ -17,11 +17,11 @@ use crate::{
     layer::{AttnContext, Block, LayerCache},
 };
 
-#[derive(Module, Debug, Clone)]
-pub struct ShortConv<Bknd: Backend> {
-    conv: Conv1d<Bknd>,
-    in_proj: Linear<Bknd>,
-    out_proj: Linear<Bknd>,
+#[derive(Module, Debug)]
+pub struct ShortConv<B: Backend> {
+    conv: Conv1d<B>,
+    in_proj: Linear<B>,
+    out_proj: Linear<B>,
 
     l_cache: usize,
     hidden_size: usize,
@@ -42,11 +42,15 @@ impl<Bknd: Backend> ConvCache<Bknd> {
     }
 
     fn push(&mut self, bx_col: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
-        let k = self.window.dims()[2];
-        let kept = self.window.clone().narrow(2, 1, k - 1);
-        self.window = Tensor::cat(vec![kept, bx_col], 2);
+        // History holds the last l-1 input columns; append the current column to
+        // form the full length-l convolution window [b, h, l].
+        let full = Tensor::cat(vec![self.window.clone(), bx_col], 2);
 
-        self.window.clone()
+        // Retain the most recent l-1 columns as history for the next step.
+        let k = full.dims()[2];
+        self.window = full.clone().narrow(2, 1, k - 1);
+
+        full
     }
 
     fn seed(&mut self, bx: Tensor<Bknd, 3>, device: &Bknd::Device) {
@@ -56,7 +60,8 @@ impl<Bknd: Backend> ConvCache<Bknd> {
         self.window = if l >= k {
             bx.narrow(2, l - k, k)
         } else {
-            Tensor::cat(vec![Tensor::zeros([b, d, k - 1], device)], 2)
+            // Prefill shorter than the history window: left-pad with zeros to length k.
+            Tensor::cat(vec![Tensor::zeros([b, d, k - l], device), bx], 2)
         };
 
         self.seeded = true;
@@ -74,7 +79,7 @@ impl<Bknd: Backend> Block<Bknd> for ShortConv<Bknd> {
         let device = input.device();
         let seqlen = input.dims()[1];
 
-        // Reshape it to [B, 3H, T]
+        // Reshape it to [Bknd, 3H, T]
         let bcx = self.in_proj.forward(input).swap_dims(1, 2);
 
         let chunks  = bcx.chunk(3, 1);      // Converts 3 tensors shaped [b, h, t]
@@ -89,7 +94,7 @@ impl<Bknd: Backend> Block<Bknd> for ShortConv<Bknd> {
                 let window = c.push(bx);
                 let [d, _, k] = self.conv.weight.val().dims();
                 let kernel = self.conv.weight.val().reshape([1, d, k]);
-                window.matmul(kernel).sum_dim(2)
+                (window *kernel).sum_dim(2)
             },
             Some(LayerCache::ConvCache(c)) => {
                 // Prefill => Run the convolution, seed the window
