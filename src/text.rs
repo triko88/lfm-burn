@@ -23,7 +23,7 @@ use crate::{
 };
 
 use crate::adapter::Bf16ToF32Adapter;
-use burn_store::{ModuleSnapshot, SafetensorsStore};
+use burn_store::{ModuleAdapter, ModuleSnapshot, SafetensorsStore, PyTorchToBurnAdapter};
 
 #[derive(Module, Debug)]
 pub struct TextModel<B: Backend> {
@@ -39,6 +39,36 @@ pub struct TextModel<B: Backend> {
 pub struct LFMCache<Bknd: Backend> {
     pub layers: Vec<LayerCache<Bknd>>,
     pub position: usize,
+}
+
+fn actual_intermediate_size(path: &str) -> Result<usize, Box <dyn std::error::Error>> {
+    // In some LFM models, the intermediate_size in the safetensors file is different from
+    // config.json. This function extracts the correct dimension the model expects.
+
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut len_buffer = [0u8; 8];
+    file.read_exact(&mut len_buffer)?;
+    let header_len = u64::from_le_bytes(len_buffer) as usize;
+
+    let mut header = vec![0u8; header_len];
+    file.read_exact(&mut header)?;
+
+    let json: serde_json::Value = serde_json::from_slice(&header)?;
+    let obj = json.as_object().ok_or("header is not a JSON object")?;
+
+    for (key, val) in obj {
+        if key.contains("feed_forward.w1.weight") {
+            let shape = val["shape"].as_array()
+                .ok_or_else(|| format!("{key} has no shape array"))?;
+            let dim = shape[0].as_u64()
+                .ok_or_else(|| format!("{key} shape[0] is not a u64"))?;
+            return Ok(dim as usize);
+        }
+    }
+
+    Err("no FFN weights found".into())
 }
 
 impl <Bknd: Backend> LFMCache <Bknd> {
@@ -129,7 +159,13 @@ impl <Bknd: Backend> TextModel<Bknd> {
     pub fn from_pretrained(dir: &str, device: &Bknd::Device)
         -> Result<Self, Box<dyn std::error::Error>>
     {
-        let config = TextModelConfig::load(format!("{dir}/config.json"))?;
+        let mut config = TextModelConfig::load(format!("{dir}/config.json"))?;
+
+        let safetensors_path = format!("{dir}/model.safetensors");
+        if let Ok(detected) = actual_intermediate_size(&safetensors_path) {
+            config.intermediate_size = detected;
+        }
+
         let mut model = config.init::<Bknd>(device);
 
         // The checkpoint uses the HF LFM2 key layout; remap it onto this crate's
@@ -140,8 +176,8 @@ impl <Bknd: Backend> TextModel<Bknd> {
         //   - burn's RmsNorm stores its scale as `gamma`, not `weight`
         // `skip_enum_variants(true)` drops the `Conv`/`Attn` enum-variant names so
         // the operator path is just `layers.N.layer.<...>`.
-        let mut store = SafetensorsStore::from_file(format!("{dir}/model.safetensors"))
-            .with_from_adapter(Bf16ToF32Adapter)
+        let mut store = SafetensorsStore::from_file(safetensors_path)
+            .with_from_adapter(PyTorchToBurnAdapter.chain(Bf16ToF32Adapter))
             .with_key_remapping(r"^model\.", "")
             .with_key_remapping(r"^embed_norm\.", "embedding_norm.")
             .with_key_remapping(r"\.conv\.", ".layer.")

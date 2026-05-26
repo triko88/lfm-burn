@@ -54,8 +54,8 @@ fn argmax_last_token<Bknd: Backend> (logits: Tensor<Bknd, 3>) -> u32 {
     let [_, t, v] = logits.dims();
 
     logits.slice([0..1, (t-1)..t, 0..v])
-        .argmax(2).into_data().as_slice::<i64>()
-        .expect("argmax must produce i64")[0] as u32
+        .argmax(2).into_data().as_slice::<i32>()
+        .expect("argmax must produce i32")[0] as u32
 }
 
 #[derive(Clone, Debug)]
@@ -122,7 +122,7 @@ impl <Bknd: Backend> LFMText<Bknd> {
             }
 
             let step: Tensor<Bknd, 2, Int> = Tensor::from_data(
-                TensorData::new(vec![next_id as i64], [1, 1]), &self.device);
+                TensorData::new(vec![next_id as i32], [1, 1]), &self.device);
 
             let hidden = self.model.forward(step, Some(&mut cache));
             let logits = self.model.lm_head(hidden);
