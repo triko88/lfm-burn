@@ -98,6 +98,10 @@ impl <Bknd: Backend> LFMText<Bknd> {
         self
     }
 
+    fn apply_chat_template(user: &str) -> String {
+        format!("<|startoftext|><|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
+    }
+
     fn generate_sync(&self, input: &str) -> Result<String, LFMError> {
         let encoding = self.tokenizer.encode(input, false)
             .map_err(|err| LFMError::Tokenizer(err.to_string()))?;
@@ -154,6 +158,7 @@ impl <Bknd: Backend> LFMText<Bknd> {
         TextModel<Bknd>: Send + 'static,
         Tokenizer: Send + 'static,
     {
+        let input = Self::apply_chat_template(input);
         let this = self.clone();
         let input = input.to_owned();
 

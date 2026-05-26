@@ -79,8 +79,13 @@ pub fn causal_mask<Bknd: Backend>(
     past: usize,
     device: &Bknd::Device,
 ) -> Tensor<Bknd, 4, Bool> {
-    Tensor::<Bknd, 2, Bool>::tril_mask([seq, past + seq], past as i64, device)
-        .unsqueeze::<4>()
+    let q_idx = Tensor::<Bknd, 1, Int>::arange(0..seq as i64, device)
+        .reshape([seq, 1]);
+
+    let kv_idx = Tensor::<Bknd, 1, Int>::arange(0..(past + seq) as i64, device)
+        .reshape([1, past + seq]);
+
+    kv_idx.greater(q_idx + past as i64).unsqueeze::<4>()
 }
 
 pub fn rope_tables<Bknd: Backend>(
