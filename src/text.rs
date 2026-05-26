@@ -22,6 +22,7 @@ use crate::{
     layer::{causal_mask, rope_tables, AttnContext, Block, LayerCache},
 };
 
+use crate::adapter::Bf16ToF32Adapter;
 use burn_store::{ModuleSnapshot, SafetensorsStore};
 
 #[derive(Module, Debug)]
@@ -76,7 +77,7 @@ impl TextModelConfig {
             layers,
             embedding_norm,
             head_dim: self.head_dim(),
-            rope_theta: self.rope_params.rope_theta,
+            rope_theta: self.rope_parameters.rope_theta,
         }
     }
 }
@@ -140,6 +141,7 @@ impl <Bknd: Backend> TextModel<Bknd> {
         // `skip_enum_variants(true)` drops the `Conv`/`Attn` enum-variant names so
         // the operator path is just `layers.N.layer.<...>`.
         let mut store = SafetensorsStore::from_file(format!("{dir}/model.safetensors"))
+            .with_from_adapter(Bf16ToF32Adapter)
             .with_key_remapping(r"^model\.", "")
             .with_key_remapping(r"^embed_norm\.", "embedding_norm.")
             .with_key_remapping(r"\.conv\.", ".layer.")
@@ -192,12 +194,12 @@ mod tests {
             conv_L_cache: 3,
             conv_bias: false,
             norm_eps: 1e-5,
-            rope_params: RopeParameters {
+            rope_parameters: RopeParameters {
                 rope_type: "default".to_string(),
                 rope_theta: 1_000_000.0,
             },
             tie_embedding: true,
-            use_pos_end: true,
+            use_pos_enc: true,
             eos_token_id: None,
         }
     }
@@ -219,7 +221,7 @@ mod tests {
             layers,
             embedding_norm,
             head_dim: config.head_dim(),
-            rope_theta: config.rope_params.rope_theta,
+            rope_theta: config.rope_parameters.rope_theta,
         }
     }
 

@@ -58,12 +58,12 @@ mod tests {
             conv_L_cache: 3,
             conv_bias: false,
             norm_eps: 1e-5,
-            rope_params: RopeParameters {
+            rope_parameters: RopeParameters {
                 rope_type: "default".to_string(),
                 rope_theta: 1_000_000.0,
             },
             tie_embedding: true,
-            use_pos_end: true,
+            use_pos_enc: true,
             eos_token_id: None,
         }
     }

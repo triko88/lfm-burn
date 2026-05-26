@@ -35,13 +35,14 @@ pub struct TextModelConfig {
     #[config(default = "1e-5")]
     pub norm_eps: f64,
 
-    pub rope_params: RopeParameters,
+    #[config(default = "RopeParameters { rope_type: \"default\".to_string(), rope_theta: 1_000_000.0 }")]
+    pub rope_parameters: RopeParameters,
 
     // Output 
     #[config(default = "true")]
     pub tie_embedding: bool,
     #[config(default = "true")]
-    pub use_pos_end: bool,
+    pub use_pos_enc: bool,
     #[config(default = "None")]
     pub eos_token_id: Option<u32>,
 }

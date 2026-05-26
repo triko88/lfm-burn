@@ -11,10 +11,10 @@
   "conv_bias": false,
   "norm_eps": 1e-5,
   "layer_types": ["conv", "full_attention"],
-  "rope_params": {
+  "rope_parameters": {
     "rope_type": "default",
     "rope_theta": 1000000.0
   },
   "tie_embedding": true,
-  "use_pos_end": true
+  "use_pos_enc": true
 }

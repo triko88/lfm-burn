@@ -1,3 +1,4 @@
+mod adapter;
 mod config;
 mod decoder;
 mod self_attn;
