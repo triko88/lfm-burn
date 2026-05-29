@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Instant;
 use burn::tensor::{
     backend::Backend,
     Int,
@@ -9,6 +10,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     config::TextModelConfig,
+    profiling::{gpu_mem_bytes, peak_cpu_rss_bytes, ProfileReport},
     text::{
         LFMCache,
         TextModel,
@@ -53,9 +55,11 @@ impl From<std::io::Error> for LFMError {
 fn argmax_last_token<Bknd: Backend> (logits: Tensor<Bknd, 3>) -> u32 {
     let [_, t, v] = logits.dims();
 
+    // `iter::<i64>()` converts from the backend's int element type (i64 on
+    // NdArray, i32 on Wgpu), so this stays backend-agnostic.
     logits.slice([0..1, (t-1)..t, 0..v])
-        .argmax(2).into_data().as_slice::<i32>()
-        .expect("argmax must produce i32")[0] as u32
+        .argmax(2).into_data().iter::<i64>()
+        .next().expect("argmax must produce a token") as u32
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +155,93 @@ impl <Bknd: Backend> LFMText<Bknd> {
             .map_err(|err| LFMError::Tokenizer(err.to_string()))
     }
 
-    pub async fn prompt(&self, input: &str) -> Result<String, LFMError> 
+    fn generate_sync_profiled(
+        &self,
+        input: &str,
+    ) -> Result<(String, ProfileReport), LFMError> {
+        let start = Instant::now();
+
+        let encoding = self.tokenizer.encode(input, false)
+            .map_err(|err| LFMError::Tokenizer(err.to_string()))?;
+
+        let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
+
+        let prefill_len = ids.len();
+        let input: Tensor<Bknd, 2, Int> = Tensor::from_data(
+                   TensorData::new(ids, [1, prefill_len]), &self.device);
+
+        let mut cache = LFMCache::init(&self.model, &self.device);
+
+        // Prefill: time the forward pass + first argmax, flushing the device
+        // before and after so lazy backends (wgpu) are measured at completion.
+        Bknd::sync(&self.device).ok();
+        let prefill_start = Instant::now();
+        let hidden = self.model.forward(input, Some(&mut cache));
+        let logits = self.model.lm_head(hidden);
+        let mut next_id = argmax_last_token::<Bknd>(logits);
+        Bknd::sync(&self.device).ok();
+        let prefill_time = prefill_start.elapsed();
+        let ttft = start.elapsed();
+
+        let mut generated: Vec<u32> = vec![next_id];
+
+        let decode_start = Instant::now();
+        for _ in 1..self.max_tokens {
+            if self.eos_id == Some(next_id) {
+                break;
+            }
+
+            let step: Tensor<Bknd, 2, Int> = Tensor::from_data(
+                TensorData::new(vec![next_id as i32], [1, 1]), &self.device);
+
+            let hidden = self.model.forward(step, Some(&mut cache));
+            let logits = self.model.lm_head(hidden);
+
+            next_id = argmax_last_token::<Bknd>(logits);
+            generated.push(next_id);
+        }
+        Bknd::sync(&self.device).ok();
+        let decode_time = decode_start.elapsed();
+
+        let report = ProfileReport {
+            prefill_tokens: prefill_len,
+            decode_tokens: generated.len().saturating_sub(1),
+            prefill_time,
+            decode_time,
+            ttft,
+            peak_cpu_rss_bytes: peak_cpu_rss_bytes(),
+            gpu_mem_bytes: gpu_mem_bytes(),
+        };
+
+        let specials = self.tokenizer.get_added_tokens_decoder();
+        let has_text = generated
+            .iter()
+            .any(|id| specials.get(id).map_or(true, |tok| !tok.special));
+        if !has_text {
+            return Ok((String::new(), report));
+        }
+
+        let text = self.tokenizer.decode(&generated, true)
+            .map_err(|err| LFMError::Tokenizer(err.to_string()))?;
+        Ok((text, report))
+    }
+
+    pub async fn prompt_profiled(&self, input: &str) -> Result<(String, ProfileReport), LFMError>
+    where
+        Bknd: Send + 'static,
+        Bknd::Device: Send + Clone + 'static,
+        TextModel<Bknd>: Send + 'static,
+        Tokenizer: Send + 'static,
+    {
+        let input = Self::apply_chat_template(input);
+        let this = self.clone();
+        let input = input.to_owned();
+
+        tokio::task::spawn_blocking(move || this.generate_sync_profiled(&input))
+            .await.map_err(|err| LFMError::Join(err.to_string()))?
+    }
+
+    pub async fn prompt(&self, input: &str) -> Result<String, LFMError>
     where
         Bknd: Send + 'static,
         Bknd::Device: Send + Clone + 'static,

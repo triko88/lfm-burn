@@ -7,6 +7,10 @@ fn zeros(count: usize) -> Vec<u8> {
     vec![0u8; count * 4]
 }
 
+fn f32_bytes(vals: &[f32]) -> Vec<u8> {
+    vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tiny dims: hidden=4, vocab=8, conv_kernel=3
     let h = 4usize;
@@ -17,9 +21,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layer_types = ["conv", "full_attention"];
 
     let d2_hxh = zeros(h * h);
-    let d2_vxh = zeros(v * h);
     let d1_h = zeros(h);
-    let d3_hxhxk = zeros(h * h * k);
+
+    // Craft a deterministic, runnable toy model so generation yields real text:
+    //   - per-layer operator_norm/ffn_norm are zero (gamma=0), making every
+    //     decoder an exact identity, so the hidden stream stays = embed(token);
+    //   - the final embedding_norm (embed_norm) is ones so it doesn't zero out;
+    //   - embed_tokens row 4 ('a') dominates, so logits always argmax to token 4
+    //     (a non-special token). Generation therefore emits "a" repeatedly.
+    let mut embed = vec![0.1f32; v * h];
+    for c in 0..h {
+        embed[4 * h + c] = 10.0;
+    }
+    let d2_vxh = f32_bytes(&embed);
+    let d1_ones = f32_bytes(&vec![1.0f32; h]);
+    // Depthwise conv weight: [out_channels=h, in_channels/groups=1, kernel=k].
+    let d3_hx1xk = zeros(h * 1 * k);
+    // Gated in_proj (h -> 3h), stored PyTorch-orientation [out=3h, in=h]; the
+    // PyTorchToBurnAdapter transposes it to burn's [h, 3h] on load.
+    let d2_3hxh = zeros(3 * h * h);
 
     let mut tensors: HashMap<String, TensorView> = HashMap::new();
 
@@ -29,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tensors.insert(
         "model.embed_norm.weight".into(),
-        TensorView::new(Dtype::F32, vec![h], &d1_h)?,
+        TensorView::new(Dtype::F32, vec![h], &d1_ones)?,
     );
 
     for (x, layer_type) in layer_types.iter().enumerate() {
@@ -52,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "conv" => {
                 tensors.insert(
                     format!("model.layers.{x}.conv.in_proj.weight"),
-                    TensorView::new(Dtype::F32, vec![h, h], &d2_hxh)?,
+                    TensorView::new(Dtype::F32, vec![3 * h, h], &d2_3hxh)?,
                 );
                 tensors.insert(
                     format!("model.layers.{x}.conv.out_proj.weight"),
@@ -60,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 tensors.insert(
                     format!("model.layers.{x}.conv.conv.weight"),
-                    TensorView::new(Dtype::F32, vec![h, h, k], &d3_hxhxk)?,
+                    TensorView::new(Dtype::F32, vec![h, 1, k], &d3_hx1xk)?,
                 );
             }
             "full_attention" => {

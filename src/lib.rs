@@ -8,9 +8,11 @@ mod mlp;
 mod text;
 
 pub mod pipeline;
+pub mod profiling;
 
 pub use pipeline::{
     LFMText,
     LFMError,
 };
+pub use profiling::ProfileReport;
 pub use text::TextModel;
