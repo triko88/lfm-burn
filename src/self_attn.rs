@@ -18,7 +18,7 @@ use crate::{
     layer::{AttnContext, Block, LayerCache, apply_rope},
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AttnCache<Bknd: Backend> {
     k: Option<Tensor<Bknd, 4>>,
     v: Option<Tensor<Bknd, 4>>,

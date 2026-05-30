@@ -27,7 +27,7 @@ pub struct ShortConv<B: Backend> {
     hidden_size: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ConvCache<Bknd: Backend> {
     window: Tensor<Bknd, 3>,
     seeded: bool,

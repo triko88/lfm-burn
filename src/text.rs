@@ -36,6 +36,7 @@ pub struct TextModel<B: Backend> {
     rope_theta: f32,
 }
 
+#[derive(Clone, Debug)]
 pub struct LFMCache<Bknd: Backend> {
     pub layers: Vec<LayerCache<Bknd>>,
     pub position: usize,

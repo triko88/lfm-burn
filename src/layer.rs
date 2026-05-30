@@ -23,6 +23,7 @@ pub struct AttnContext<Bknd: Backend> {
     pub mask: Option<Tensor<Bknd, 4, Bool>>,
 }
 
+#[derive(Clone, Debug)]
 pub enum LayerCache<Bknd: Backend> {
     ConvCache(ConvCache<Bknd>),
     AttnCache(AttnCache<Bknd>),

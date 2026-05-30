@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{
+    fmt,
+    cell::RefCell,
+};
 use std::time::Instant;
 use burn::tensor::{
     backend::Backend,
@@ -65,6 +68,7 @@ fn argmax_last_token<Bknd: Backend> (logits: Tensor<Bknd, 3>) -> u32 {
 #[derive(Clone, Debug)]
 pub struct LFMText<Bknd: Backend> {
     model: TextModel<Bknd>,
+    cache: RefCell<LFMCache<Bknd>>,
     tokenizer: Tokenizer,
     device: Bknd::Device,
     max_tokens: usize,
@@ -88,8 +92,11 @@ impl <Bknd: Backend> LFMText<Bknd> {
         let tokenizer = Tokenizer::from_file(format!("{dir}/tokenizer.json"))
             .map_err(|err| LFMError::TokenizerLoad(err.to_string()))?;
 
+        let cache = LFMCache::init(&model, device).into();
+
         Ok(Self {
             model,
+            cache,
             tokenizer,
             device: device.clone(),
             max_tokens: 128,
@@ -116,9 +123,7 @@ impl <Bknd: Backend> LFMText<Bknd> {
         let input: Tensor<Bknd, 2, Int> = Tensor::from_data(
                    TensorData::new(ids, [1, prefill_len]), &self.device);
 
-        let mut cache = LFMCache::init(&self.model, &self.device);
-
-        let hidden = self.model.forward(input, Some(&mut cache));
+        let hidden = self.model.forward(input, Some(&mut self.cache.borrow_mut()));
         let logits = self.model.lm_head(hidden);
         let mut next_id = argmax_last_token::<Bknd>(logits);
 
@@ -132,7 +137,7 @@ impl <Bknd: Backend> LFMText<Bknd> {
             let step: Tensor<Bknd, 2, Int> = Tensor::from_data(
                 TensorData::new(vec![next_id as i32], [1, 1]), &self.device);
 
-            let hidden = self.model.forward(step, Some(&mut cache));
+            let hidden = self.model.forward(step, Some(&mut self.cache.borrow_mut()));
             let logits = self.model.lm_head(hidden);
 
             next_id = argmax_last_token::<Bknd>(logits);
