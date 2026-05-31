@@ -33,7 +33,7 @@ RMSNorm, RoPE, tied embeddings).
 
 **Roadmap**
 
-- [ ] LFM 2.5 350M (text)
+- [x] LFM 2.5 350M (text)
 - [ ] LFM 2.5 1.2B — Instruct and Thinking (text)
 - [ ] LFM 2.5 Audio
 - [ ] LFM 2.5 Vision
@@ -82,8 +82,7 @@ Swap `NdArray` for `Wgpu` to run on the GPU — the rest of the code is unchange
   pick the compute backend.
 
 Incremental token streaming (`Stream<Item = String>`), multi-turn sessions, and
-sampling strategies beyond greedy are specified in
-[`docs/public-api-requirements.md`](docs/public-api-requirements.md) and are on
+sampling strategies beyond greedy and are on
 the path to v1.
 
 ## Building
