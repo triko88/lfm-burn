@@ -34,6 +34,9 @@ pub struct TextModel<B: Backend> {
     // RoPE
     head_dim: usize,
     rope_theta: f32,
+
+    // KV cache allocation limit
+    max_position_embeddings: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -76,7 +79,7 @@ impl <Bknd: Backend> LFMCache <Bknd> {
     pub fn init(model: &TextModel<Bknd>, device: &Bknd::Device) -> Self {
         let layers = model.layers.iter().map(|dec| {
             if dec.is_attn() {
-                LayerCache::AttnCache(AttnCache::init())
+                LayerCache::AttnCache(AttnCache::init(model.max_position_embeddings))
             } else {
                 let (h, l) = dec.conv_cache_dims()
                     .expect("non-attn decoder must have conv cache dims");
@@ -109,6 +112,7 @@ impl TextModelConfig {
             embedding_norm,
             head_dim: self.head_dim(),
             rope_theta: self.rope_parameters.rope_theta,
+            max_position_embeddings: self.max_position_embeddings,
         }
     }
 }
@@ -147,6 +151,31 @@ impl <Bknd: Backend> TextModel<Bknd> {
         }
 
         out
+    }
+
+    /// GEMV `(name, k, n)` shapes for the model's `nn::Linear` projections, read
+    /// from the loaded weights so they are congruent with the model being
+    /// profiled (the safetensors-adjusted `intermediate_size`, etc.).
+    ///
+    /// Shapes are uniform across layers, so the first attention layer (for
+    /// q/k/v/out) and the first decoder (for the MLP) are representative; the
+    /// attention shapes are omitted if the model has no attention layer.
+    pub fn linear_shapes(&self) -> Vec<(String, usize, usize)> {
+        let mut shapes: Vec<(String, usize, usize)> = Vec::new();
+
+        if let Some(attn) = self.layers.iter().find_map(|l| l.attn_shapes()) {
+            shapes.extend(attn.into_iter().map(|(name, k, n)| (name.to_string(), k, n)));
+        }
+        if let Some(first) = self.layers.first() {
+            shapes.extend(first.mlp_shapes().into_iter().map(|(name, k, n)| (name.to_string(), k, n)));
+        }
+
+        // lm_head reuses the tied embedding weight `[vocab, hidden]`; its GEMV
+        // projects hidden -> vocab, so (k, n) = (hidden, vocab).
+        let [vocab, hidden] = self.embed_tokens.weight.val().dims();
+        shapes.push(("lm_head".to_string(), hidden, vocab));
+
+        shapes
     }
 
     pub fn lm_head(&self, hidden: Tensor<Bknd, 3>) -> Tensor<Bknd, 3> {
@@ -253,13 +282,14 @@ mod tests {
             .with_epsilon(config.norm_eps)
             .init(device);
 
-        TextModel {
-            embed_tokens,
-            layers,
-            embedding_norm,
-            head_dim: config.head_dim(),
-            rope_theta: config.rope_parameters.rope_theta,
-        }
+    TextModel {
+        embed_tokens,
+        layers,
+        embedding_norm,
+        head_dim: config.head_dim(),
+        rope_theta: config.rope_parameters.rope_theta,
+        max_position_embeddings: config.max_position_embeddings,
+    }
     }
 
     fn assert_output_shape_is_hidden_or_vocab(dims: &[usize], expected_batch: usize, expected_seq: usize, config: &TextModelConfig) {

@@ -53,6 +53,20 @@ impl <Bknd: Backend> LFMDecoder<Bknd> {
         }
     }
 
+    /// GEMV `(name, k, n)` triples for this decoder's MLP projections.
+    pub fn mlp_shapes(&self) -> [(&'static str, usize, usize); 3] {
+        self.feed_forward.gemv_shapes()
+    }
+
+    /// GEMV `(name, k, n)` triples for the attention projections, or `None` if
+    /// this is a conv layer.
+    pub fn attn_shapes(&self) -> Option<[(&'static str, usize, usize); 4]> {
+        match &self.layer {
+            Layer::Attn(a) => Some(a.gemv_shapes()),
+            Layer::Conv(_) => None,
+        }
+    }
+
     pub fn new(config: &TextModelConfig, layer_idx: usize, device: &Bknd::Device) -> Self {
         let layer = match config.layer_types[layer_idx].as_str() {
             "conv" => Layer::Conv(ShortConv::new(config, device)),

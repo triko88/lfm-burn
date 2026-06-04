@@ -13,7 +13,10 @@ use tokenizers::Tokenizer;
 
 use crate::{
     config::TextModelConfig,
-    profiling::{gpu_mem_bytes, peak_cpu_rss_bytes, ProfileReport},
+    profiling::{
+        bench_gemv, gpu_mem_bytes, peak_cpu_rss_bytes, time_iters, GemvResult, GemvShape,
+        LatencyStats, ProfileReport, SteadyStateReport,
+    },
     text::{
         LFMCache,
         TextModel,
@@ -92,7 +95,15 @@ impl <Bknd: Backend> LFMText<Bknd> {
         let tokenizer = Tokenizer::from_file(format!("{dir}/tokenizer.json"))
             .map_err(|err| LFMError::TokenizerLoad(err.to_string()))?;
 
-        let cache = LFMCache::init(&model, device).into();
+        let cache: RefCell<LFMCache<Bknd>> = LFMCache::init(&model, device).into();
+
+        // Warm up the model on a throwaway cache so the persistent `cache` stays
+        // pristine (position 0, conv windows unseeded) for the first generate call.
+        // Forwarding into `cache` itself would seed the conv windows and advance
+        // the attention position, making the first real prefill take the decode
+        // path and fail with a window/kernel shape mismatch.
+        let mut warmup_cache = LFMCache::init(&model, device);
+        let _ = model.forward(Tensor::zeros([1, 100], device), Some(&mut warmup_cache));
 
         Ok(Self {
             model,
@@ -231,6 +242,83 @@ impl <Bknd: Backend> LFMText<Bknd> {
         Ok((text, report))
     }
 
+    /// The model's `nn::Linear` projection shapes (all GEMVs at `m = 1`), read
+    /// from the loaded weights via [`TextModel::linear_shapes`], followed by a
+    /// generic square size sweep that maps the matmul latency curve independent
+    /// of the model.
+    fn gemv_shapes(&self) -> Vec<GemvShape> {
+        let mut shapes: Vec<GemvShape> = self.model.linear_shapes()
+            .into_iter()
+            .map(|(name, k, n)| GemvShape { name, m: 1, k, n })
+            .collect();
+
+        for s in [512usize, 1024, 2048, 4096, 8192] {
+            shapes.push(GemvShape { name: format!("square_{s}"), m: 1, k: s, n: s });
+        }
+
+        shapes
+    }
+
+    /// GEMV microbenchmark over the model's projection shapes plus a square
+    /// sweep, timing both `nn::Linear` and raw `matmul` (see [`bench_gemv`]).
+    pub fn gemv_microbench(&self, warmup: usize, iters: usize) -> Vec<GemvResult> {
+        bench_gemv::<Bknd>(&self.device, &self.gemv_shapes(), warmup, iters)
+    }
+
+    /// Steady-state per-phase latency: the distribution of a single prefill
+    /// forward pass (cold cache each sample) and of a single warm decode step,
+    /// each measured `iters` times after `warmup` unmeasured runs.
+    ///
+    /// Uses a local cache so the persistent `self.cache` is left untouched.
+    pub fn steady_state_latency(
+        &self,
+        input: &str,
+        warmup: usize,
+        iters: usize,
+    ) -> Result<SteadyStateReport, LFMError> {
+        let encoding = self.tokenizer.encode(input, false)
+            .map_err(|err| LFMError::Tokenizer(err.to_string()))?;
+
+        let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
+        let prefill_len = ids.len();
+
+        let sync = || {
+            Bknd::sync(&self.device).ok();
+        };
+
+        // Prefill: each sample starts from a cold cache, matching a real first
+        // turn, and runs the full prompt forward + lm_head.
+        let prefill_samples = time_iters(warmup, iters, sync, || {
+            let mut cache = LFMCache::init(&self.model, &self.device);
+            let input: Tensor<Bknd, 2, Int> = Tensor::from_data(
+                TensorData::new(ids.clone(), [1, prefill_len]), &self.device);
+            let hidden = self.model.forward(input, Some(&mut cache));
+            let _ = self.model.lm_head(hidden);
+        });
+
+        // Decode: prefill once into a warm cache, then time single-token steps.
+        // Each step appends to the cache, so we feed a fixed token id and let the
+        // cache grow; this measures the steady-state per-token decode latency.
+        let mut cache = LFMCache::init(&self.model, &self.device);
+        let input: Tensor<Bknd, 2, Int> = Tensor::from_data(
+            TensorData::new(ids.clone(), [1, prefill_len]), &self.device);
+        let hidden = self.model.forward(input, Some(&mut cache));
+        let next_id = argmax_last_token::<Bknd>(self.model.lm_head(hidden));
+
+        let decode_samples = time_iters(warmup, iters, sync, || {
+            let step: Tensor<Bknd, 2, Int> = Tensor::from_data(
+                TensorData::new(vec![next_id as i32], [1, 1]), &self.device);
+            let hidden = self.model.forward(step, Some(&mut cache));
+            let _ = self.model.lm_head(hidden);
+        });
+
+        Ok(SteadyStateReport {
+            prefill_tokens: prefill_len,
+            prefill: LatencyStats::from_durations(&prefill_samples),
+            decode: LatencyStats::from_durations(&decode_samples),
+        })
+    }
+
     pub async fn prompt_profiled(&self, input: &str) -> Result<(String, ProfileReport), LFMError>
     where
         Bknd: Send + 'static,
@@ -259,5 +347,63 @@ impl <Bknd: Backend> LFMText<Bknd> {
 
         tokio::task::spawn_blocking(move || this.generate_sync(&input))
             .await.map_err(|err| LFMError::Join(err.to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::NdArray;
+    use burn::backend::ndarray::NdArrayDevice;
+
+    type TB = NdArray;
+
+    fn load() -> LFMText<TB> {
+        let device = NdArrayDevice::Cpu;
+        LFMText::<TB>::from_pretrained("test_repo", &device).expect("load test_repo")
+    }
+
+    // GEMV shapes are read from the loaded model weights (all m == 1) and
+    // include the generic square sweep.
+    #[test]
+    fn gemv_shapes_from_model_weights() {
+        let lfm = load();
+        let shapes = lfm.gemv_shapes();
+
+        assert!(shapes.iter().all(|s| s.m == 1), "GEMV shapes must have m == 1");
+
+        // 8 model-sourced (4 attn + 3 mlp + lm_head) + 5 square-sweep entries.
+        assert_eq!(shapes.len(), 13);
+
+        let find = |name: &str| shapes.iter().find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("missing shape {name}"));
+
+        // test_repo: hidden_size = 4, vocab_size = 8.
+        assert_eq!((find("lm_head").k, find("lm_head").n), (4, 8));
+        assert_eq!(find("q_proj").k, 4);   // hidden
+        assert_eq!(find("out_proj").n, 4); // hidden
+        assert_eq!(find("mlp.w1").k, 4);   // hidden
+        // intermediate_size comes from the actual weights (the safetensors
+        // header can override config.json), so assert internal consistency
+        // rather than a hardcoded value.
+        assert_eq!(find("mlp.w1").n, find("mlp.w2").k);
+
+        for s in [512usize, 1024, 2048, 4096, 8192] {
+            let sq = find(&format!("square_{s}"));
+            assert_eq!((sq.k, sq.n), (s, s));
+        }
+    }
+
+    // [RED PHASE] steady_state_latency yields the requested number of samples
+    // for both phases.
+    #[test]
+    fn steady_state_reports_requested_iters() {
+        let lfm = load();
+        let report = lfm.steady_state_latency("The capital of France is", 1, 3)
+            .expect("steady-state run");
+
+        assert_eq!(report.prefill.n, 3);
+        assert_eq!(report.decode.n, 3);
+        assert!(report.prefill_tokens > 0);
     }
 }

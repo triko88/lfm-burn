@@ -14,5 +14,5 @@ pub use pipeline::{
     LFMText,
     LFMError,
 };
-pub use profiling::ProfileReport;
+pub use profiling::{GemvResult, GemvShape, LatencyStats, ProfileReport, SteadyStateReport};
 pub use text::TextModel;

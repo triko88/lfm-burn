@@ -23,30 +23,53 @@ pub struct AttnCache<Bknd: Backend> {
     k: Option<Tensor<Bknd, 4>>,
     v: Option<Tensor<Bknd, 4>>,
     len: usize,
+    max_seq: usize,
 }
 
 impl <Bknd: Backend> AttnCache<Bknd> {
-    pub fn init() -> Self {
-        Self { k: None, v: None, len: 0 }
+    pub fn init(max_seq: usize) -> Self {
+        Self { k: None, v: None, len: 0, max_seq }
     }
 
     fn append(&mut self, k_new: Tensor<Bknd, 4>, v_new: Tensor<Bknd, 4>)
     -> (Tensor<Bknd, 4>, Tensor<Bknd, 4>) {
-        let k = match self.k.take() {
-            Some(k) => Tensor::cat(vec![k, k_new], 2),
-            None => k_new,
+        let new_len = self.len + k_new.dims()[2];
+
+        let k = Self::grow_and_write(self.max_seq, self.len, self.k.take(), k_new);
+        let v = Self::grow_and_write(self.max_seq, self.len, self.v.take(), v_new);
+
+        self.len = new_len;
+        let kc = k.clone();
+        let vc = v.clone();
+        self.k = Some(k);
+        self.v = Some(v);
+
+        (kc.narrow(2, 0, self.len), vc.narrow(2, 0, self.len))
+    }
+
+    fn grow_and_write(max_seq: usize, offset: usize, buf: Option<Tensor<Bknd, 4>>, val: Tensor<Bknd, 4>) -> Tensor<Bknd, 4> {
+        let seqlen = val.dims()[2];
+        let new_len = offset + seqlen;
+        let [b, kvh, _, h] = val.dims();
+
+        let grown = match buf {
+            Some(buf) => {
+                let cap = buf.dims()[2];
+                if new_len <= cap {
+                    buf
+                } else {
+                    let new_cap = cap.max(new_len) * 2;
+                    let nxt = Tensor::zeros([b, kvh, new_cap, h], &buf.device());
+                    nxt.slice_assign([0..b, 0..kvh, 0..cap, 0..h], buf)
+                }
+            }
+            None => {
+                let cap = max_seq.max(new_len);
+                Tensor::zeros([b, kvh, cap, h], &val.device())
+            }
         };
 
-        let v = match self.v.take() {
-            Some(v) => Tensor::cat(vec![v, v_new], 2),
-            None => v_new,
-        };
-
-        self.len = k.dims()[2];
-        self.k = Some(k.clone());
-        self.v = Some(v.clone());
-
-        (k, v)
+        grown.slice_assign([0..b, 0..kvh, offset..new_len, 0..h], val)
     }
 }
 
@@ -138,6 +161,25 @@ impl <Bknd: Backend> SelfAttn<Bknd> {
             head_dim: d,
             scale: (d as f32).powf(-0.5),
         }
+    }
+
+    /// GEMV `(name, k, n)` triples for the four attention projections, read from
+    /// the actual weights (`Linear` weight `[in, out]` == `(k, n)`).
+    pub fn gemv_shapes(&self) -> [(&'static str, usize, usize); 4] {
+        let dims = |l: &Linear<Bknd>| {
+            let [k, n] = l.weight.val().dims();
+            (k, n)
+        };
+        let (qk, qn) = dims(&self.q_proj);
+        let (kk, kn) = dims(&self.k_proj);
+        let (vk, vn) = dims(&self.v_proj);
+        let (ok, on) = dims(&self.out_proj);
+        [
+            ("q_proj", qk, qn),
+            ("k_proj", kk, kn),
+            ("v_proj", vk, vn),
+            ("out_proj", ok, on),
+        ]
     }
 }
 

@@ -7,19 +7,50 @@ use lfm_rs::{LFMError, LFMText};
 
 #[tokio::main]
 async fn main() -> Result<(), LFMError> {
-    let mut args = std::env::args().skip(1);
-    let source = args.next().unwrap_or_else(|| "test_repo".to_string());
-    let prompt = args.next().unwrap_or_else(|| "The capital of France is".to_string());
+    // Flags can appear anywhere; remaining positionals are [model_dir] [prompt].
+    let mut steady_state = false;
+    let mut gemv = false;
+    let mut positionals = Vec::new();
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--steady-state" => steady_state = true,
+            "--gemv" => gemv = true,
+            _ => positionals.push(arg),
+        }
+    }
+    let mut positionals = positionals.into_iter();
+    let source = positionals.next().unwrap_or_else(|| "test_repo".to_string());
+    let prompt = positionals.next().unwrap_or_else(|| "The capital of France is".to_string());
 
     let dir = resolve_model_dir(&source)?;
 
     let device = Default::default();
     let lfm = LFMText::<NdArray>::from_pretrained(&dir, &device)?.with_max_tokens(64);
 
-    let (text, report) = lfm.prompt_profiled(&prompt).await?;
+    // Warmup/measured-iteration counts for the microbenchmarks.
+    const WARMUP: usize = 5;
+    const ITERS: usize = 50;
 
-    println!("=== output ===\n{text}\n");
-    println!("=== profile ===\n{report}");
+    if gemv {
+        println!("=== GEMV microbench (warmup={WARMUP}, iters={ITERS}) ===");
+        for result in lfm.gemv_microbench(WARMUP, ITERS) {
+            println!("{result}");
+        }
+        println!();
+    }
+
+    if steady_state {
+        let report = lfm.steady_state_latency(&prompt, WARMUP, ITERS)?;
+        println!("=== steady-state latency (warmup={WARMUP}, iters={ITERS}) ===\n{report}\n");
+    }
+
+    // Default end-to-end profile runs unless a microbench mode was requested.
+    if !gemv && !steady_state {
+        let (text, report) = lfm.prompt_profiled(&prompt).await?;
+        println!("=== output ===\n{text}\n");
+        println!("=== profile ===\n{report}");
+    }
+
     Ok(())
 }
 

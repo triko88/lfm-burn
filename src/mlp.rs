@@ -31,6 +31,20 @@ impl<Bknd: Backend> MLP<Bknd> {
 
         self.w2.forward(w1_sliu * w3)
     }
+
+    /// GEMV `(name, k, n)` triples for this block's three projections, read from
+    /// the actual weights. A `Linear` built with `new(in, out)` stores weight
+    /// `[in, out]`, so `dims()` is exactly `(k, n)`.
+    pub fn gemv_shapes(&self) -> [(&'static str, usize, usize); 3] {
+        let dims = |l: &Linear<Bknd>| {
+            let [k, n] = l.weight.val().dims();
+            (k, n)
+        };
+        let (k1, n1) = dims(&self.w1);
+        let (k3, n3) = dims(&self.w3);
+        let (k2, n2) = dims(&self.w2);
+        [("mlp.w1", k1, n1), ("mlp.w3", k3, n3), ("mlp.w2", k2, n2)]
+    }
 }
 
 #[cfg(test)]
