@@ -1,5 +1,12 @@
 # lfm-rs
 
+> [!NOTE]
+> **I have halted the progress of this project** after testing my engine on
+> LFM-2.5. The engine takes a minute or two when cold starting an SLM. While
+> the steady state show promising results, I find this moment to be a good
+> opportunity to explore kernel dispatch. I've started a separate project in C++23
+> to address this issue.
+
 A lightweight inference engine for Liquid AI's Liquid Foundation Models (LFM),
 built on [Burn](https://burn.dev). Inspired by SQLite's software philosophy,
 `lfm-rs` runs language models *as a library*: embedded, in-process, and with
